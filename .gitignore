@@ -1,0 +1,20 @@
+# MicroPython bytecode + caches
+__pycache__/
+*.pyc
+*.mpy
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Local-only backups (not part of the firmware itself)
+_v3-backup-*/
+
+# Logs captured during bring-up
+*.log
