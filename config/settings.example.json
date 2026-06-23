@@ -1,0 +1,19 @@
+{
+    "wifi_ssid": "YOUR_SSID",
+    "wifi_password": "YOUR_PASSWORD",
+    "device_type": "flexgrid",
+    "fw_version": "v4.0.0",
+    "udp_sensor_port": 3141,
+    "cmd_port": 8001,
+    "mdns_service": "_openmuscle._udp",
+    "announce_interval_s": 1,
+    "max_subscribers": 4,
+    "heartbeat_timeout_s": 5,
+    "scan_interval_ms": 20,
+    "status_interval_s": 5,
+    "imu_enabled": true,
+    "sd_logging": false,
+    "haptic_enabled": false,
+    "status_palette": "default",
+    "display_brightness": 255
+}

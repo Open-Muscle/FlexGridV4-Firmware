@@ -18,3 +18,6 @@ _v3-backup-*/
 
 # Logs captured during bring-up
 *.log
+
+# Real settings.json contains Wi-Fi credentials; do not commit
+config/settings.json
