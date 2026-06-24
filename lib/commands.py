@@ -33,6 +33,19 @@ import logger
 _OK  = "ok"
 _ERR = "error"
 
+# Supervisor backoff after the listener task dies. Keep it short; the listener
+# being down means hubs cannot subscribe, so faster restart wins over backoff.
+_SUPERVISOR_RESTART_DELAY_S = 1
+
+# CancelledError is a BaseException subclass in modern asyncio. We MUST let it
+# propagate when a task is deliberately cancelled (e.g. shutdown). Older
+# MicroPython builds may not expose it; fall back to a sentinel that never
+# matches so the BaseException catch still works.
+try:
+    _CancelledError = asyncio.CancelledError
+except AttributeError:
+    _CancelledError = type("_NoCancelledError", (BaseException,), {})
+
 
 class CommandServer:
     def __init__(self, port, handlers):
@@ -46,12 +59,42 @@ class CommandServer:
         self.handlers = handlers
         self._server = None
 
-    async def start(self):
-        """Bind cmd_port and accept connections. Returns once the server is
-        listening; the actual accept loop runs as a background asyncio task.
+    async def serve_forever(self):
+        """Supervised bind + accept loop. Spawn this as a background task from
+        flexgrid.py: ``asyncio.create_task(cmd_server.serve_forever())``.
+
+        Why a supervisor:
+        Without one, an mpremote-induced KeyboardInterrupt (a BaseException,
+        not Exception) lands on whichever asyncio task is currently running.
+        If that task is the internal accept task spawned by
+        ``asyncio.start_server``, the listener dies silently while the rest of
+        the device keeps running. Phone and PC hubs then see a black hole.
+        This loop catches BaseException (except CancelledError, which means
+        deliberate shutdown), logs, sleeps briefly, and rebinds.
         """
-        self._server = await asyncio.start_server(self._handle_client, "0.0.0.0", self.port)
-        logger.info("Command server listening on TCP {}".format(self.port))
+        while True:
+            try:
+                self._server = await asyncio.start_server(
+                    self._handle_client, "0.0.0.0", self.port)
+                logger.info("Command server listening on TCP {}".format(self.port))
+                # Stay alive so the supervisor catches anything that propagates
+                # up from the asyncio internals. Sleep in a long loop rather
+                # than one huge sleep so a cancel surfaces promptly.
+                while True:
+                    await asyncio.sleep(60)
+            except _CancelledError:
+                logger.info("Command server cancelled; exiting supervisor")
+                raise
+            except BaseException as e:
+                logger.warn("Command server died: {} ({}); restarting in {}s".format(
+                    type(e).__name__, e, _SUPERVISOR_RESTART_DELAY_S))
+                try:
+                    if self._server is not None:
+                        self._server.close()
+                except Exception:
+                    pass
+                self._server = None
+                await asyncio.sleep(_SUPERVISOR_RESTART_DELAY_S)
 
     async def _handle_client(self, reader, writer):
         peer = writer.get_extra_info("peername") or ("?", 0)
@@ -68,8 +111,16 @@ class CommandServer:
                 ack = await self._handle_one(line, peer)
                 writer.write(ujson.dumps(ack).encode("utf-8") + b"\n")
                 await writer.drain()
-        except Exception as e:
-            logger.warn("Command client {} errored: {}".format(peer, e))
+        except _CancelledError:
+            # Deliberate shutdown of this client task; clean up and re-raise.
+            raise
+        except BaseException as e:
+            # Catch BaseException (not Exception) so a KeyboardInterrupt
+            # from a dev tool doesn't propagate past this boundary and take
+            # down the listener task with it. The supervisor in serve_forever
+            # is the safety net; this is the first line of defense.
+            logger.warn("Command client {} errored: {} ({})".format(
+                peer, type(e).__name__, e))
         finally:
             try:
                 writer.close()

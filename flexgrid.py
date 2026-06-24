@@ -369,13 +369,17 @@ async def main():
 
     # Command channel: hubs subscribe + send commands here. The handlers
     # close over our device_state so they can mutate the live runtime.
+    # serve_forever() is a supervised loop: if the listener dies (e.g. an
+    # mpremote KeyboardInterrupt lands on the asyncio accept task), it
+    # logs, sleeps briefly, and rebinds. PROTOCOL.md section 10 requires
+    # this for v1.0 conformance.
     cmd_server = CommandServer(
         port=settings.get("cmd_port", 8001),
         handlers=build_handlers(state),
     )
-    await cmd_server.start()
 
     logger.info("Spawning async tasks")
+    asyncio.create_task(cmd_server.serve_forever())
     asyncio.create_task(sensor_loop(state, sensor_matrix, network, sd))
     asyncio.create_task(display_loop(display, sensor_matrix))
     asyncio.create_task(menu_loop(menu))
