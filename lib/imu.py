@@ -1,23 +1,23 @@
 # lib/imu.py
-# ICM-42688-P IMU driver.
+# IMU driver supporting two chip variants the V4 BOM has shipped with:
 #
-# V4 hardware change: the IMU footprint is populated. Connected via I2C on
-# the same bus as the OLED (pinmap.I2C_SDA / pinmap.I2C_SCL). Default I2C
-# address is 0x68 (AD0 strap low); confirm against the V4 schematic and
-# adjust pinmap.IMU_I2C_ADDR if needed.
+#   1. Genuine InvenSense ICM-42688-P  (LCSC C1850418)
+#        I2C address: 0x68 (AD0=GND) or 0x69 (AD0=VDDIO)
+#        WHO_AM_I at register 0x75, expected value 0x47
+#        Sensor data at: ACC 0x1F-0x24, GYRO 0x25-0x2A, TEMP 0x1D-0x1E
 #
-# This is a minimal driver: WHO_AM_I check, set the ODR/range, periodic read
-# of accel and gyro into a status snapshot. We intentionally do not stream
-# IMU data at the same rate as the sensor matrix; the main loop reads it at
-# whatever cadence the status loop runs (default ~5 s) and attaches the
-# latest values to the device status `meta` block.
+#   2. TOKMAS "ICM-42688-P" rebrand    (LCSC C54308212)
+#        Same package + general spec, but DIFFERENT I2C address and register map.
+#        I2C address: 0x36 (SDO=GND) or 0x37 (SDO=VDDIO)
+#        CHIP_ID at register 0x1F (any non-zero value confirms presence)
+#        Sensor data at: ACC 0x00-0x05, GYRO 0x06-0x0B, TEMP 0x0C-0x0D
 #
-# Future work (not in v1): higher-rate IMU read for orientation fusion
-# during recording, with the IMU samples interleaved with sensor frames at
-# the source. That requires a deliberate frame format change and is out of
-# scope for the initial bring-up.
+# The driver auto-probes both variants on boot. If neither responds, IMU stays
+# disabled and the firmware degrades gracefully.
 #
-# Datasheet references: TDK InvenSense ICM-42688-P, document DS-000347 r1.8.
+# Datasheet refs:
+#   - TDK InvenSense DS-000347 (genuine ICM-42688-P)
+#   - TOKMAS ICM-42688-P-TOKMAS PDF distributed by LCSC
 
 from machine import I2C, Pin
 import time
@@ -25,127 +25,173 @@ import pinmap
 import logger
 
 
-# Register addresses (Bank 0). The chip has user-bank switching for advanced
-# config; we stay in bank 0 for everything the firmware needs.
-_REG_WHO_AM_I       = 0x75
-_REG_PWR_MGMT0      = 0x4E
-_REG_GYRO_CONFIG0   = 0x4F
-_REG_ACCEL_CONFIG0  = 0x50
-_REG_TEMP_DATA1     = 0x1D  # temp high byte; subsequent registers are accel + gyro
-_REG_ACCEL_DATA_X1  = 0x1F  # 6 bytes: accel X/Y/Z big-endian
-_REG_GYRO_DATA_X1   = 0x25  # 6 bytes: gyro X/Y/Z big-endian
+# ---------------------------------------------------------------------------
+# Variant: genuine InvenSense ICM-42688-P
+# ---------------------------------------------------------------------------
+_INV_ADDRS         = (0x68, 0x69)
+_INV_REG_WHO_AM_I  = 0x75
+_INV_WHO_AM_I      = 0x47
+_INV_REG_PWR_MGMT0 = 0x4E
+_INV_REG_GYRO_CFG0 = 0x4F
+_INV_REG_ACC_CFG0  = 0x50
+_INV_REG_TEMP_DATA = 0x1D    # 14 bytes contiguous: TEMP(2) + ACC(6) + GYRO(6)
+_INV_PWR_MGMT0_LN  = 0x0F    # accel + gyro both in low-noise mode
+_INV_ACC_CFG0      = (0b010 << 5) | 0b1000   # +/-4g, 100 Hz
+_INV_GYRO_CFG0     = (0b001 << 5) | 0b1000   # +/-1000 dps, 100 Hz
 
-# WHO_AM_I expected value for the ICM-42688-P. The -PC variant returns the
-# same; treat both as compatible.
-_WHO_AM_I_EXPECTED = 0x47
 
-# Power management: enable accel + gyro low-noise mode. Bits per datasheet
-# section 14.36 (PWR_MGMT0):
-#   bit 5: TEMP_DIS    0 = enabled
-#   bit 4: IDLE        0 = on
-#   bits 3:2: GYRO_MODE   00=off, 01=standby, 10=reserved, 11=low_noise
-#   bits 1:0: ACCEL_MODE  00=off, 01=low_power, 10=low_noise, 11=reserved
-# We want gyro + accel both in low-noise mode: 0b00001111 = 0x0F.
-_PWR_MGMT0_LN = 0x0F
+# ---------------------------------------------------------------------------
+# Variant: TOKMAS "ICM-42688-P"
+# Different register layout entirely. Power-on defaults are usable so the
+# driver doesn't write any config registers; if you need different ODR/FS,
+# they live at 0x20-0x25 per the TOKMAS datasheet.
+# ---------------------------------------------------------------------------
+_TKM_ADDRS         = (0x36, 0x37)
+_TKM_REG_CHIP_ID   = 0x1F     # any non-zero read = chip present
+_TKM_REG_ACC_DATA  = 0x00     # 6 bytes: ACC X/Y/Z (low, high)
+_TKM_REG_GYRO_DATA = 0x06     # 6 bytes: GYRO X/Y/Z (low, high)
+_TKM_REG_TEMP_DATA = 0x0C     # 2 bytes: TEMP (low, high)
 
-# Default range/ODR: +/-4g, 1000 dps, 100 Hz. Easy on the bus and plenty
-# accurate for orientation tracking during a wearable session.
-# ACCEL_CONFIG0: bits 7:5 = full scale (000=16g, 001=8g, 010=4g, 011=2g),
-#                bits 3:0 = ODR (0110 = 1 kHz, 1000 = 100 Hz)
-_ACCEL_CONFIG0 = (0b010 << 5) | 0b1000   # +/-4g, 100 Hz
-# GYRO_CONFIG0:  bits 7:5 = full scale (000=2000dps, 001=1000dps, ...)
-#                bits 3:0 = ODR
-_GYRO_CONFIG0  = (0b001 << 5) | 0b1000   # +/-1000 dps, 100 Hz
+
+# Variant tags returned by detect()
+VARIANT_NONE   = None
+VARIANT_INVENS = "invensense"
+VARIANT_TOKMAS = "tokmas"
 
 
 class IMU:
-    def __init__(self, i2c=None, addr=None):
-        self.addr = addr if addr is not None else pinmap.IMU_I2C_ADDR
+    def __init__(self, i2c=None):
         if i2c is None:
             i2c = I2C(0, sda=Pin(pinmap.I2C_SDA), scl=Pin(pinmap.I2C_SCL), freq=400_000)
         self.i2c = i2c
+        self.variant = VARIANT_NONE
+        self.addr = None
         self.present = False
-        # Latest sample, refreshed by read(). Units: accel = raw counts at +/-4g,
-        # gyro = raw counts at +/-1000 dps, temp = raw counts.
+        # Most recent sample. ACC/GYRO are raw counts in their respective ranges.
+        # temp_c is computed for InvenSense; for TOKMAS it's raw counts (the
+        # ROOM_TEMP offset register exists but the conversion isn't documented
+        # in our hands; raw is exposed and the hub can convert if it has the
+        # offset).
         self.last = {
             "ax": 0, "ay": 0, "az": 0,
             "gx": 0, "gy": 0, "gz": 0,
             "temp_c": None,
         }
 
+    # ---- detection + init -----------------------------------------------------
+
     def init(self):
-        """Probe + configure the IMU. Returns True on success. If the chip
-        is absent or unresponsive, returns False and self.present stays
-        False; the main loop should treat this as a non-fatal warning and
-        skip IMU reads."""
-        try:
-            who = self._read_reg(_REG_WHO_AM_I)
-            if who != _WHO_AM_I_EXPECTED:
-                logger.warn("IMU WHO_AM_I unexpected: 0x{:02X} (want 0x{:02X})".format(
-                    who, _WHO_AM_I_EXPECTED))
-                return False
-            # Bring power management up first; some samples need a small
-            # delay before subsequent register writes take effect.
-            self._write_reg(_REG_PWR_MGMT0, _PWR_MGMT0_LN)
-            time.sleep_ms(2)
-            self._write_reg(_REG_ACCEL_CONFIG0, _ACCEL_CONFIG0)
-            self._write_reg(_REG_GYRO_CONFIG0, _GYRO_CONFIG0)
-            time.sleep_ms(2)
-            self.present = True
-            logger.info("IMU present (WHO_AM_I=0x{:02X}); accel +/-4g 100Hz, gyro +/-1000dps 100Hz".format(who))
-            return True
-        except Exception as e:
-            logger.warn("IMU init failed: {}".format(e))
-            return False
+        """Probe both variants. Returns True if either was found and brought up."""
+        # Try genuine InvenSense first
+        for addr in _INV_ADDRS:
+            try:
+                who = self.i2c.readfrom_mem(addr, _INV_REG_WHO_AM_I, 1)[0]
+                if who == _INV_WHO_AM_I:
+                    self.addr = addr
+                    self.variant = VARIANT_INVENS
+                    self._init_invens()
+                    self.present = True
+                    logger.info("IMU: InvenSense ICM-42688-P at 0x{:02X}, WHO_AM_I=0x{:02X}".format(addr, who))
+                    return True
+            except OSError:
+                continue
+
+        # Then try TOKMAS variant
+        for addr in _TKM_ADDRS:
+            try:
+                cid = self.i2c.readfrom_mem(addr, _TKM_REG_CHIP_ID, 1)[0]
+                if cid != 0x00 and cid != 0xFF:
+                    self.addr = addr
+                    self.variant = VARIANT_TOKMAS
+                    # TOKMAS power-on defaults give usable sensor data already.
+                    self.present = True
+                    logger.info("IMU: TOKMAS ICM-42688-P at 0x{:02X}, CHIP_ID=0x{:02X}".format(addr, cid))
+                    return True
+            except OSError:
+                continue
+
+        logger.warn("IMU: no compatible device found on I2C (tried InvenSense 0x68/0x69 and TOKMAS 0x36/0x37)")
+        self.variant = VARIANT_NONE
+        self.present = False
+        return False
+
+    def _init_invens(self):
+        """Configure genuine InvenSense ICM-42688-P for low-noise mode at 100 Hz."""
+        self.i2c.writeto_mem(self.addr, _INV_REG_PWR_MGMT0, bytes([_INV_PWR_MGMT0_LN]))
+        time.sleep_ms(2)
+        self.i2c.writeto_mem(self.addr, _INV_REG_ACC_CFG0, bytes([_INV_ACC_CFG0]))
+        self.i2c.writeto_mem(self.addr, _INV_REG_GYRO_CFG0, bytes([_INV_GYRO_CFG0]))
+        time.sleep_ms(2)
+
+    # ---- read -----------------------------------------------------------------
 
     def read(self):
-        """One-shot read of accel + gyro + temp. Updates self.last and
-        returns it. Safe to call from a status loop at any rate; the chip
-        is in low-noise mode and gives the latest sample each time.
-        Returns None if the IMU is not present."""
+        """One-shot read of accel + gyro + temp. Updates self.last and returns it.
+        Returns None if the chip isn't present or the read fails."""
         if not self.present:
             return None
         try:
-            # Accel + gyro live contiguously after the temp data registers,
-            # so a single 14-byte read covers everything: temp (2), accel (6),
-            # gyro (6). Cuts the I2C transactions per cycle from 3 to 1.
-            buf = self.i2c.readfrom_mem(self.addr, _REG_TEMP_DATA1, 14)
-            self.last["temp_c"] = _sign16(buf[0], buf[1]) / 132.48 + 25.0
-            self.last["ax"]     = _sign16(buf[2], buf[3])
-            self.last["ay"]     = _sign16(buf[4], buf[5])
-            self.last["az"]     = _sign16(buf[6], buf[7])
-            self.last["gx"]     = _sign16(buf[8], buf[9])
-            self.last["gy"]     = _sign16(buf[10], buf[11])
-            self.last["gz"]     = _sign16(buf[12], buf[13])
-            return self.last
+            if self.variant == VARIANT_INVENS:
+                return self._read_invens()
+            if self.variant == VARIANT_TOKMAS:
+                return self._read_tokmas()
         except Exception as e:
             logger.warn("IMU read failed: {}".format(e))
-            return None
+        return None
+
+    def _read_invens(self):
+        # 14 bytes starting at 0x1D: TEMP(2 big-endian) + ACC(6 big-endian) + GYRO(6 big-endian)
+        buf = self.i2c.readfrom_mem(self.addr, _INV_REG_TEMP_DATA, 14)
+        self.last["temp_c"] = _sign16_be(buf[0], buf[1]) / 132.48 + 25.0
+        self.last["ax"]     = _sign16_be(buf[2], buf[3])
+        self.last["ay"]     = _sign16_be(buf[4], buf[5])
+        self.last["az"]     = _sign16_be(buf[6], buf[7])
+        self.last["gx"]     = _sign16_be(buf[8], buf[9])
+        self.last["gy"]     = _sign16_be(buf[10], buf[11])
+        self.last["gz"]     = _sign16_be(buf[12], buf[13])
+        return self.last
+
+    def _read_tokmas(self):
+        # 6 bytes accel + 6 bytes gyro + 2 bytes temp, all little-endian (LO byte
+        # at the lower address per the TOKMAS datasheet's "ACC DATA XL @ 0x00,
+        # ACC DATA XH @ 0x01" pattern).
+        # Single 14-byte read at 0x00 is contiguous: ACC(6) + GYRO(6) + TEMP(2).
+        buf = self.i2c.readfrom_mem(self.addr, _TKM_REG_ACC_DATA, 14)
+        self.last["ax"]     = _sign16_le(buf[0], buf[1])
+        self.last["ay"]     = _sign16_le(buf[2], buf[3])
+        self.last["az"]     = _sign16_le(buf[4], buf[5])
+        self.last["gx"]     = _sign16_le(buf[6], buf[7])
+        self.last["gy"]     = _sign16_le(buf[8], buf[9])
+        self.last["gz"]     = _sign16_le(buf[10], buf[11])
+        # TOKMAS temp is 16-bit raw counts; conversion needs the per-chip
+        # ROOM_TEMP offset register (0x29-0x2A) and the formula
+        # T_c = (TEMP_DATA - ROOM_TEMP)/14 + 25. We expose raw for now.
+        self.last["temp_c"] = float(_sign16_le(buf[12], buf[13]))
+        return self.last
+
+    # ---- summary for status meta ----------------------------------------------
 
     def status_summary(self):
-        """Compact snapshot suitable for inclusion in the device_status
-        meta block. Includes raw counts only; the hub side can convert to
-        physical units using the configured ranges (currently +/-4g and
-        +/-1000 dps)."""
+        """Compact snapshot for the status meta block."""
         if not self.present:
             return None
         return {
-            "accel":  [self.last["ax"], self.last["ay"], self.last["az"]],
-            "gyro":   [self.last["gx"], self.last["gy"], self.last["gz"]],
-            "temp_c": (round(self.last["temp_c"], 2)
-                       if self.last["temp_c"] is not None else None),
+            "variant": self.variant,
+            "addr":    self.addr,
+            "accel":   [self.last["ax"], self.last["ay"], self.last["az"]],
+            "gyro":    [self.last["gx"], self.last["gy"], self.last["gz"]],
+            "temp_c":  (round(self.last["temp_c"], 2)
+                        if self.last["temp_c"] is not None else None),
         }
 
-    # ---- low-level helpers ----------------------------------------------------
 
-    def _read_reg(self, reg):
-        return self.i2c.readfrom_mem(self.addr, reg, 1)[0]
-
-    def _write_reg(self, reg, value):
-        self.i2c.writeto_mem(self.addr, reg, bytes([value & 0xFF]))
+def _sign16_be(hi, lo):
+    """Big-endian unsigned bytes -> signed 16-bit (genuine InvenSense format)."""
+    v = (hi << 8) | lo
+    return v - 0x10000 if v & 0x8000 else v
 
 
-def _sign16(hi, lo):
-    """Big-endian unsigned bytes -> signed 16-bit."""
+def _sign16_le(lo, hi):
+    """Little-endian unsigned bytes -> signed 16-bit (TOKMAS format)."""
     v = (hi << 8) | lo
     return v - 0x10000 if v & 0x8000 else v
