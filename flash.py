@@ -143,6 +143,7 @@ def main():
         ("lib/discovery.py",              "lib/discovery.py"),
         ("lib/imu.py",                    "lib/imu.py"),
         ("lib/sd_logger.py",              "lib/sd_logger.py"),
+        ("lib/provisioning.py",           "lib/provisioning.py"),
         ("config/settings.json",          "config/settings.json"),
     ]
     # mkdir lib and config first (one shot)

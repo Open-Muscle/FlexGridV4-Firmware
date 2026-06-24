@@ -74,6 +74,13 @@ class StatusLed:
         """Force off regardless of state. Used at deep sleep / shutdown."""
         self._set_rgb(0, 0, 0)
 
+    def set_rgb(self, r, g, b):
+        """Public direct RGB write (0..255 per channel). For callers that
+        need a fixed color outside the named-state palette, e.g. the
+        provisioning AP-mode indicator. Bypasses the animator; the next
+        set_state() call will overwrite it."""
+        self._set_rgb(r, g, b)
+
     def animate(self, t_ms):
         """Advance animation by the wall-clock time delta. Called by the
         animator coroutine in flexgrid.py at ~30 Hz. t_ms is the current

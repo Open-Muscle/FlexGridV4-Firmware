@@ -42,6 +42,7 @@ from discovery        import Discovery
 from commands         import CommandServer, build_handlers
 from imu              import IMU
 from sd_logger        import SDLogger
+import provisioning
 
 
 # Reset-cause names. ESP32-S3 MicroPython exposes the abstracted constants;
@@ -313,10 +314,50 @@ async def main():
         uos.mkdir('config')
 
     settings = SettingsManager.load()
-    redacted = {k: ("<redacted>" if k == "wifi_password" else v)
+    redacted = {k: ("<redacted>" if k in ("wifi_password", "provisioning_psk") else v)
                 for k, v in settings.items()}
     logger.info("Settings: {}".format(redacted))
     logger.info("Device id: {}".format(settings["device_id"]))
+
+    # ----------------------------------------------------------------------
+    # State machine fork (PROVISIONING.md section 2).
+    # An empty wifi_ssid means we have never been provisioned (or were
+    # reset back to factory). Boot to AP mode and run the provisioning
+    # HTTP server until the user POSTs /provision, then soft-reset into
+    # the provisioned branch below.
+    # ----------------------------------------------------------------------
+    if not (settings.get("wifi_ssid") or "").strip():
+        logger.info("Unprovisioned (wifi_ssid empty); entering AP mode")
+        # Minimal subsystems for the AP path: display (to print SSID + PSK
+        # on the OLED) and status LED (solid blue for setup mode).
+        display    = DisplayManager()
+        status_led = StatusLed()
+        status_led.set_rgb(0, 0, 255)
+
+        # Bring the AP up FIRST so we know the PSK (provisioning.run mints it
+        # if missing), then paint the OLED with the final SSID + PSK.
+        psk = provisioning.start_ap(
+            settings, settings["device_type"], settings["device_id"])
+        SettingsManager.save(settings)
+        display.text_screen([
+            "OpenMuscle",
+            "WIFI SETUP",
+            provisioning.ssid_for(settings["device_type"], settings["device_id"]),
+            "PSK " + psk,
+        ])
+
+        info_extras = {
+            "caps":   ["sensor", "status", "cmd", "imu"],
+            "matrix": [15, 4],
+        }
+        # serve() blocks until /provision lands, then soft_resets. Since
+        # start_ap was already called, we drive serve() directly rather than
+        # the bundled run() entry point.
+        state = provisioning._ProvisioningState(settings, SettingsManager, info_extras)
+        await provisioning.serve(state)
+        # serve() ends in machine.soft_reset(); if it somehow returns, the
+        # next loop iteration should fall through to STA.
+        return
 
     # Build the subsystems in roughly the order they are needed.
     subscribers   = Subscribers(

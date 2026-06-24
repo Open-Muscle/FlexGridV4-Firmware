@@ -45,6 +45,13 @@ class SettingsManager:
         "wifi_ssid":         "",
         "wifi_password":     "",
 
+        # Provisioning PSK. Per-device random 10-char string minted by
+        # lib/provisioning.mint_psk() on first AP-mode entry and persisted
+        # here. Out-of-band delivery via OLED line 4 per PROVISIONING.md
+        # section 3; never derived from the device id. Default is empty so
+        # the first AP-mode entry mints + persists a fresh PSK.
+        "provisioning_psk":  "",
+
         # Discovery + transport (PROTOCOL.md v1.0 port split)
         # No udp_target_ip in V4. Sources unicast to subscribed hubs only.
         "udp_announce_port": 3140,             # UDP broadcast port for discovery announces
