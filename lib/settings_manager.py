@@ -45,10 +45,11 @@ class SettingsManager:
         "wifi_ssid":         "",
         "wifi_password":     "",
 
-        # Discovery + transport
+        # Discovery + transport (PROTOCOL.md v1.0 port split)
         # No udp_target_ip in V4. Sources unicast to subscribed hubs only.
-        "udp_sensor_port":   3141,             # the port hubs send subscribe to and unicast frames from
-        "cmd_port":          8001,             # command channel (TCP/WS) port
+        "udp_announce_port": 3140,             # UDP broadcast port for discovery announces
+        "udp_sensor_port":   3141,             # UDP unicast port for sensor/label data frames
+        "cmd_port":          8001,             # command channel (TCP) port
         "mdns_service":      "_openmuscle._udp",
         "announce_interval_s": 1,              # how often to broadcast the fallback beacon while unsubscribed
         "max_subscribers":   4,                # spec section 5.1

@@ -7,10 +7,14 @@
 #      this via the `network` interface's hostname + `mdns_service`; others
 #      do not. We use a best-effort wrapper that no-ops gracefully when the
 #      underlying API is absent.
-#   2. UDP broadcast beacon to 255.255.255.255:3141. This is the fallback
+#   2. UDP broadcast beacon to 255.255.255.255:3140. This is the fallback
 #      for networks that block multicast (corporate Wi-Fi, captive portals,
 #      consumer routers with multicast disabled). The beacon carries the
 #      full announce JSON as the packet payload.
+#
+# Port: 3140 in PROTOCOL.md v1.0 (announce strictly separated from data on
+# 3141). Pre-spec firmware broadcast on 3141; hubs dual-listen on both
+# ports during the migration window per PROTOCOL.md section 9.3.
 #
 # Beacon cadence: ~1 Hz while no hub is subscribed. Once at least one hub
 # has subscribed we stop broadcasting to keep the channel quiet, and resume
@@ -23,7 +27,7 @@ import time
 import logger
 
 
-BROADCAST_PORT_DEFAULT = 3141
+BROADCAST_PORT_DEFAULT = 3140
 
 
 class Discovery:
@@ -47,7 +51,11 @@ class Discovery:
         self.device_type = settings["device_type"]
         self.fw_version = settings.get("fw_version", "v4.0.0")
         self.service_type = settings.get("mdns_service", "_openmuscle._udp")
-        self.beacon_port = settings.get("udp_sensor_port", BROADCAST_PORT_DEFAULT)
+        # Announce port is separate from the data port in v1.0 (PROTOCOL.md
+        # section 2): 3140 for announce broadcast, 3141 for data unicast.
+        # Old settings.json files may not have udp_announce_port; the
+        # BROADCAST_PORT_DEFAULT fallback (now 3140) covers that.
+        self.beacon_port = settings.get("udp_announce_port", BROADCAST_PORT_DEFAULT)
         self.announce_interval_s = settings.get("announce_interval_s", 1)
 
         # Sender socket for the broadcast beacon. Created once, reused.
