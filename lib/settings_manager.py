@@ -38,9 +38,12 @@ class SettingsManager:
         "device_type":       "flexgrid",
         "fw_version":        "v4.0.0",
 
-        # Wi-Fi (provisioned via the on-device menu, not baked in)
-        "wifi_ssid":         "OpenMuscle",
-        "wifi_password":     "3141592653",
+        # Wi-Fi. Empty by default so an unprovisioned device boots to AP mode
+        # per PROVISIONING.md state machine (unprovisioned -> AP -> POST
+        # /provision -> persisted). Never commit real SSID or password here;
+        # config/settings.json (gitignored) is the operator-supplied path.
+        "wifi_ssid":         "",
+        "wifi_password":     "",
 
         # Discovery + transport
         # No udp_target_ip in V4. Sources unicast to subscribed hubs only.
