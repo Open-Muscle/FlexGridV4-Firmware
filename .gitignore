@@ -21,3 +21,6 @@ _v3-backup-*/
 
 # Real settings.json contains Wi-Fi credentials; do not commit
 config/settings.json
+
+# Downloaded MicroPython .bin (reproducible from micropython.org)
+firmware/
