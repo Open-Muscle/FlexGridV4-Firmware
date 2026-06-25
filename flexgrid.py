@@ -181,6 +181,16 @@ async def sensor_loop(state, sensor_matrix, network, sd):
     global _current_op
     n = 0
     err_count = 0
+    # Rate-profile accumulators (per-step microseconds + iter count).
+    # Logged every PROFILE_WINDOW iterations as one info line so the
+    # overhead is one int add per step + a periodic log. Diagnostic for
+    # the 60 Hz target work (board #0179).
+    _p_scan_us = 0
+    _p_emit_us = 0
+    _p_iter_us = 0
+    _p_count = 0
+    PROFILE_WINDOW = 100
+    last_iter_t = time.ticks_us()
     while True:
         # Pet the watchdog FIRST so it is the first thing that stops
         # happening if this loop wedges.
@@ -189,8 +199,11 @@ async def sensor_loop(state, sensor_matrix, network, sd):
         meta_every = max(1, 1000 // max(1, interval_ms))
         try:
             _current_op = "scan_matrix"
+            t_scan_start = time.ticks_us()
             matrix = sensor_matrix.scan_matrix()
+            t_scan_end = time.ticks_us()
             n += 1
+            t_emit_end = t_scan_end  # default if not streaming
             if state.streaming:
                 _current_op = "send_sensor"
                 meta = device_status if (n % meta_every == 0) else None
@@ -199,6 +212,7 @@ async def sensor_loop(state, sensor_matrix, network, sd):
                 # use this for smooth orientation viz; the slower meta.imu
                 # path is back-compat for hubs that have not migrated.
                 await network.send_sensor(matrix, meta=meta, imu=state.imu_cache)
+                t_emit_end = time.ticks_us()
             # SD recording is independent of streaming; the user may want
             # to log offline while no hub is around.
             if sd.is_recording():
@@ -206,7 +220,25 @@ async def sensor_loop(state, sensor_matrix, network, sd):
                 sd.write_frame(matrix)
             _current_op = "sleep"
             err_count = 0
-        except asyncio.CancelledError:
+            # Profile accumulators
+            now_us = time.ticks_us()
+            _p_scan_us += time.ticks_diff(t_scan_end, t_scan_start)
+            _p_emit_us += time.ticks_diff(t_emit_end, t_scan_end)
+            _p_iter_us += time.ticks_diff(now_us, last_iter_t)
+            last_iter_t = now_us
+            _p_count += 1
+            if _p_count >= PROFILE_WINDOW:
+                avg_scan = _p_scan_us // _p_count
+                avg_emit = _p_emit_us // _p_count
+                avg_iter = _p_iter_us // _p_count
+                # Effective rate from real iter time: 1e6 / avg_iter_us
+                rate_hz = (1000000 // avg_iter) if avg_iter > 0 else 0
+                logger.info(
+                    "rate: scan={}us emit={}us iter={}us interval={}ms streaming={} rate={}Hz".format(
+                        avg_scan, avg_emit, avg_iter, interval_ms,
+                        state.streaming, rate_hz))
+                _p_scan_us = 0; _p_emit_us = 0; _p_iter_us = 0; _p_count = 0
+        except (asyncio.CancelledError, SystemExit):
             raise
         except BaseException as e:
             if err_count == 0 or err_count % 100 == 0:
@@ -237,7 +269,7 @@ async def imu_loop(state, imu, interval_ms=33):
                     "accel": [imu.last["ax"], imu.last["ay"], imu.last["az"]],
                     "gyro":  [imu.last["gx"], imu.last["gy"], imu.last["gz"]],
                 }
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, SystemExit):
             raise
         except BaseException as e:
             try:
@@ -265,7 +297,7 @@ async def wdt_canary_loop(interval_s=5):
                     gap_ms, _current_op))
             else:
                 logger.info("wdt: gap={}ms op={}".format(gap_ms, _current_op))
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, SystemExit):
             raise
         except BaseException as e:
             try:
@@ -282,7 +314,7 @@ async def display_loop(display, sensor_matrix, interval_ms=66):
     while True:
         try:
             display.draw_sensor_matrix(sensor_matrix.matrix)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, SystemExit):
             raise
         except BaseException as e:
             logger.warn("display_loop draw failed: {} ({})".format(type(e).__name__, e))
@@ -294,7 +326,7 @@ async def menu_loop(menu):
     while True:
         try:
             menu.check_buttons()
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, SystemExit):
             raise
         except BaseException as e:
             logger.warn("menu_loop check failed: {} ({})".format(type(e).__name__, e))
@@ -331,7 +363,7 @@ async def status_loop(state, power, network, imu, interval_s=5):
             subs = state.subscribers.count()
             logger.info("BAT {:.2f}V ({}%) up={}s rssi={} mem={} subs={} {}".format(
                 v, p, uptime_s, rssi, free_mem, subs, wifi))
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, SystemExit):
             raise
         except BaseException as e:
             logger.warn("status_loop iter failed: {} ({})".format(type(e).__name__, e))
@@ -346,7 +378,7 @@ async def subscriber_prune_loop(subscribers, interval_s=1):
             if dropped:
                 logger.info("Pruned {} stale subscriber(s); remaining={}".format(
                     dropped, subscribers.count()))
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, SystemExit):
             raise
         except BaseException as e:
             logger.warn("subscriber_prune_loop failed: {} ({})".format(type(e).__name__, e))
@@ -382,7 +414,7 @@ async def status_led_loop(state, status_led, network, interval_ms=33):
                 # Booted, Wi-Fi up, never subscribed yet.
                 status_led.set_state("boot")
             status_led.animate(now_ms)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, SystemExit):
             raise
         except BaseException as e:
             logger.warn("status_led_loop failed: {} ({})".format(type(e).__name__, e))
@@ -395,7 +427,7 @@ async def gc_loop(interval_s=2):
     while True:
         try:
             gc.collect()
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, SystemExit):
             raise
         except BaseException as e:
             try:
@@ -414,7 +446,7 @@ async def reboot_watcher(state):
                 logger.info("Soft-resetting in 500 ms...")
                 await asyncio.sleep_ms(500)
                 machine.soft_reset()
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, SystemExit):
             raise
         except BaseException as e:
             logger.warn("reboot_watcher failed: {} ({})".format(type(e).__name__, e))
