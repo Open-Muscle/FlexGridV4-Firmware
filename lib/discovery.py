@@ -95,15 +95,21 @@ class Discovery:
         this no-ops and we rely entirely on the broadcast beacon.
 
         We do NOT raise on failure; the broadcast beacon makes mDNS optional.
+        Audit-pass fix (board #0189): only mark _mdns_registered=True on
+        actual success so a Wi-Fi-down boot does not poison the flag
+        permanently; the announce_loop's Wi-Fi-reconnect path can then
+        retry register_mdns() on the next link-up.
         """
         if self._mdns_registered:
             return
 
+        success = False
         try:
             # Some MicroPython builds expose `network.WLAN.config('hostname', ...)`
             # which underneath registers an mDNS hostname record. Set our id as
             # the hostname so `flexgrid-<6hex>.local` resolves on the LAN.
             self.sta.config(hostname=self.device_id)
+            success = True
         except Exception as e:
             logger.warn("mDNS hostname set failed (ok, beacon will cover it): {}".format(e))
 
@@ -119,8 +125,9 @@ class Discovery:
         # except Exception as e:
         #     logger.warn("mdns_service registration failed: {}".format(e))
 
-        self._mdns_registered = True
-        logger.info("mDNS hostname/service best-effort registered as {}".format(self.device_id))
+        if success:
+            self._mdns_registered = True
+            logger.info("mDNS hostname/service best-effort registered as {}".format(self.device_id))
 
     def _announce_txt_record(self):
         """Same fields as the broadcast payload, formatted for mDNS TXT keys.
@@ -147,6 +154,13 @@ class Discovery:
         Catches BaseException (except CancelledError) so an interrupt during
         sendto cannot silently kill the announce task. Same defensive pattern
         as sensor_loop / cmd-server (board #0156 WDT-reset investigation).
+
+        Re-registers mDNS on Wi-Fi reconnect (audit pass, board #0189): the
+        sta.config(hostname=...) call only takes effect while STA is up,
+        and after a flap the hostname binding can be lost. Tracks the
+        connected edge per loop iter and re-fires register_mdns() on the
+        rising transition. Cheap (one isconnected() call per second);
+        keeps `<device-id>.local` resolution alive across reconnects.
         """
         # Try the mDNS registration once (no-ops if the build lacks support).
         try:
@@ -154,8 +168,19 @@ class Discovery:
         except Exception:
             pass
 
+        was_connected = False
         while True:
             try:
+                now_connected = self.sta.isconnected()
+                if now_connected and not was_connected:
+                    # Rising edge: Wi-Fi just came back up. Force a fresh
+                    # mDNS registration; the prior one (if any) is stale.
+                    self._mdns_registered = False
+                    try:
+                        self.register_mdns()
+                    except Exception as e:
+                        logger.warn("mDNS re-register on reconnect failed: {}".format(e))
+                was_connected = now_connected
                 if not self.subscribers.has_any():
                     self._send_beacon()
             except (asyncio.CancelledError, SystemExit):
