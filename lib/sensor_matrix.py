@@ -1,6 +1,16 @@
 # lib/sensor_matrix.py
 # 15-column x 4-row Velostat sensor matrix on the V3 flex PCB.
 #
+# v0.1.8: discharge_us 100 -> 50, settle_us 5 -> 0 (60Hz profile, #0179).
+#   Per profile data on d7af0b (firmware board #0182): scan_matrix is
+#   23 ms = 41% of iter time. Of that, 60 cells * 100us discharge = 6 ms
+#   alone, and 60 cells * 5us settle = 0.3 ms. Dropping discharge to
+#   50us saves ~3 ms; settle 0 saves 0.3 ms; together ~3.3 ms shaved
+#   without touching the wire format. Test for carryover regression at
+#   discharge=50us; if it re-emerges, revert to 100us and seek another
+#   speedup vector. Discard-first-read kept (still needed for SAH-cap
+#   staleness after Pin.init(IN)).
+#
 # v0.1.7: discharge bumped 30us -> 100us.
 #   Empirical: with 30us discharge + discard-first-read, the
 #   right-direction carryover was still ~60% per col (1460 -> 934 -> 557 ->
@@ -21,8 +31,8 @@ import pinmap
 
 
 class SensorMatrix:
-    def __init__(self, attenuation=ADC.ATTN_11DB, settle_us=5,
-                 discharge_us=100, addr_settle_us=2, avg_samples=1):
+    def __init__(self, attenuation=ADC.ATTN_11DB, settle_us=0,
+                 discharge_us=50, addr_settle_us=2, avg_samples=1):
         # 4-bit MUX address lines (CD74HC4067)
         self.S = [
             Pin(pinmap.MUX_S0, Pin.OUT),

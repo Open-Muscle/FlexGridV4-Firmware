@@ -308,9 +308,17 @@ async def wdt_canary_loop(interval_s=5):
         await asyncio.sleep(interval_s)
 
 
-async def display_loop(display, sensor_matrix, interval_ms=66):
-    """Render at ~15 Hz independent of scan rate. I2C at 400 kHz takes ~22 ms
-    per full frame; 66 ms gives the bus plenty of slack and keeps CPU free."""
+async def display_loop(display, sensor_matrix, interval_ms=200):
+    """Render at ~5 Hz independent of scan rate.
+
+    Was 66 ms (~15 Hz). Bumped to 200 ms during the 60Hz profile work
+    (#0179) because the SSD1306 I2C frame takes ~22 ms, so at 66 ms
+    the display was eating ~33% of bus / CPU time, blocking sensor_loop
+    iterations that overlapped a draw. At 200 ms display CPU drops to
+    ~11% (frees ~22 ms of CPU per 200 ms window) without meaningfully
+    hurting the live-readout UX. Easy to revert by passing
+    interval_ms=66 at the call site.
+    """
     while True:
         try:
             display.draw_sensor_matrix(sensor_matrix.matrix)
