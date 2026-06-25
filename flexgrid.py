@@ -432,6 +432,22 @@ async def main():
     asyncio.create_task(gc_loop())
     asyncio.create_task(reboot_watcher(state))
 
+    # STA-mode provisioning admin: serves GET /info and POST /reprovision
+    # on TCP 80 against the device's LAN IP, per PROVISIONING.md section
+    # 4.3 ("Phones reach this endpoint over the STA-mode normal LAN; it
+    # does not require AP mode"). Bound to the STA interface IP so we do
+    # not double-expose the reprovision endpoint when the AP interface is
+    # also up briefly during STA bring-up.
+    sta_ip = network.local_ip()
+    if sta_ip:
+        sta_state = provisioning._ProvisioningState(
+            settings, SettingsManager,
+            info_extras={"caps": state.caps, "matrix": list(state.matrix_dims)},
+            state="provisioned")
+        asyncio.create_task(provisioning.serve(sta_state, bind_ip=sta_ip))
+    else:
+        logger.warn("No STA IP yet; skipping STA-mode reprovision listener (will not retry this boot)")
+
     # Watchdog: armed AFTER tasks are spawned so the slow boot + Wi-Fi
     # phase does not trip it. Once armed, sensor_loop must call _feed_wdt()
     # within WDT_TIMEOUT_MS or the chip hard-resets and reset_cause=WDT

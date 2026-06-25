@@ -159,11 +159,12 @@ body:JSON.stringify({ssid:f.get("ssid"),password:f.get("password")})})
 # ---------------------------------------------------------------------------
 
 class _ProvisioningState:
-    def __init__(self, settings, settings_manager, info_extras):
+    def __init__(self, settings, settings_manager, info_extras, state="unprovisioned"):
         self.settings = settings
         self.settings_manager = settings_manager
         self.info_extras = info_extras or {}
         self.reboot_pending = False
+        self.state = state   # "unprovisioned" (AP mode) or "provisioned" (STA mode)
 
     def info_payload(self):
         d = {
@@ -173,7 +174,7 @@ class _ProvisioningState:
             "dev":   self.settings.get("device_type"),
             "fw":    self.settings.get("fw_version"),
             "caps":  self.info_extras.get("caps", []),
-            "state": "unprovisioned",
+            "state": self.state,
         }
         # Optional device-type-specific fields (e.g. matrix dims for FlexGrid)
         for k, v in self.info_extras.items():
@@ -313,12 +314,21 @@ def start_ap(settings, device_type, device_id):
     return psk
 
 
-async def serve(state):
-    """Run the HTTP server until state.reboot_pending goes True, then wait
-    PROVISION_REBOOT_DELAY_MS so the response drains, then machine.soft_reset()."""
+async def serve(state, bind_ip=AP_IP):
+    """Run the HTTP server. In AP mode (bind_ip=AP_IP, the default) this
+    blocks until state.reboot_pending and then soft_resets, which is the
+    boot-time provisioning flow. In STA mode (bind_ip=device's LAN IP)
+    this runs forever as a background task, serving /info and /reprovision
+    against the home LAN per PROVISIONING.md section 4.3. Reprovision
+    still soft_resets when triggered (the user is intentionally rebooting
+    the device back to AP mode).
+
+    Bind to a specific IP rather than 0.0.0.0 so we do not accidentally
+    expose the reprovision endpoint on both interfaces simultaneously."""
     server = await asyncio.start_server(
-        lambda r, w: _handle(r, w, state), AP_IP, HTTP_PORT)
-    logger.info("Provisioning HTTP server listening on {}:{}".format(AP_IP, HTTP_PORT))
+        lambda r, w: _handle(r, w, state), bind_ip, HTTP_PORT)
+    logger.info("Provisioning HTTP server listening on {}:{} (state={})".format(
+        bind_ip, HTTP_PORT, state.state))
 
     try:
         while not state.reboot_pending:
