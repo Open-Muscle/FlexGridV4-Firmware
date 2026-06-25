@@ -143,6 +143,10 @@ class Discovery:
     async def announce_loop(self):
         """Periodic broadcast beacon. Cadence drops to silent once a hub is
         subscribed; resumes the moment the subscriber list empties.
+
+        Catches BaseException (except CancelledError) so an interrupt during
+        sendto cannot silently kill the announce task. Same defensive pattern
+        as sensor_loop / cmd-server (board #0156 WDT-reset investigation).
         """
         # Try the mDNS registration once (no-ops if the build lacks support).
         try:
@@ -154,8 +158,11 @@ class Discovery:
             try:
                 if not self.subscribers.has_any():
                     self._send_beacon()
-            except Exception as e:
-                logger.warn("announce_loop iter failed: {}".format(e))
+            except asyncio.CancelledError:
+                raise
+            except BaseException as e:
+                logger.warn("announce_loop iter failed: {} ({})".format(
+                    type(e).__name__, e))
             await asyncio.sleep(self.announce_interval_s)
 
     def _send_beacon(self):

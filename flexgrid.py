@@ -85,8 +85,23 @@ device_status = {
 # main() returns control to the event loop.
 _wdt = None
 
+# WDT instrumentation. _last_feed_ms is the most recent ticks_ms() at which
+# the watchdog was fed (i.e. sensor_loop was healthy). _current_op is what
+# sensor_loop is doing right now ("scan_matrix" / "send_sensor" / "sd_write"
+# / "sleep"). The wdt_canary_loop logs both periodically; on a WDT-fire-reset,
+# the persistent log's LAST canary line is the leading edge of the stall AND
+# names the step we were on when it began. This is how we root-cause WDT
+# resets without paying for per-iteration flash writes.
+_last_feed_ms = 0
+_current_op   = "boot"
+
 
 def _feed_wdt():
+    global _last_feed_ms
+    try:
+        _last_feed_ms = time.ticks_ms()
+    except Exception:
+        pass
     if _wdt is not None:
         try:
             _wdt.feed()
@@ -144,7 +159,19 @@ async def sensor_loop(state, sensor_matrix, network, sd):
     with [Errno 12] ENOMEM. 1 Hz is plenty for a battery readout in the
     hub UI; hubs merge meta keys non-destructively so stale fields persist
     between updates.
+
+    BaseException catch: phone (#0156) caught d7af0b doing live WDT resets.
+    The most likely class of cause is the same one that bit the cmd server
+    pre-supervisor: a BaseException (MemoryError, KeyboardInterrupt from
+    mpremote, or asyncio internals raising one of these) propagates past
+    the old `except Exception` and silently kills this task. With this loop
+    dead, _feed_wdt() never runs and the device hard-resets ~30 s later.
+    Catching BaseException prevents that silent-death mode; CancelledError
+    still re-raises so deliberate shutdown works. _current_op + the
+    wdt_canary_loop together identify which step was running when a stall
+    began.
     """
+    global _current_op
     n = 0
     err_count = 0
     while True:
@@ -154,21 +181,56 @@ async def sensor_loop(state, sensor_matrix, network, sd):
         interval_ms = state.scan_interval_ms
         meta_every = max(1, 1000 // max(1, interval_ms))
         try:
+            _current_op = "scan_matrix"
             matrix = sensor_matrix.scan_matrix()
             n += 1
             if state.streaming:
+                _current_op = "send_sensor"
                 meta = device_status if (n % meta_every == 0) else None
                 await network.send_sensor(matrix, meta=meta)
             # SD recording is independent of streaming; the user may want
             # to log offline while no hub is around.
             if sd.is_recording():
+                _current_op = "sd_write"
                 sd.write_frame(matrix)
+            _current_op = "sleep"
             err_count = 0
-        except Exception as e:
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:
             if err_count == 0 or err_count % 100 == 0:
-                logger.error("sensor_loop iter #{} failed: {}".format(err_count, e))
+                logger.error("sensor_loop iter #{} op={} failed: {} ({})".format(
+                    err_count, _current_op, type(e).__name__, e))
             err_count += 1
         await asyncio.sleep_ms(interval_ms)
+
+
+async def wdt_canary_loop(interval_s=5):
+    """Logs the gap-since-last-WDT-feed and what sensor_loop step is current,
+    every interval_s seconds. Diagnostic for the V4 WDT-reset mystery (board
+    #0156). On a WDT-fire-reset the persistent log's last canary line tells
+    us when the stall started AND which sensor_loop step was running when it
+    did. Cheap (one log line per 5 s). Logs at WARN level when gap is more
+    than 20 s (approaching the 30 s WDT_TIMEOUT_MS) so it stands out in
+    post-mortem review."""
+    while True:
+        try:
+            now = time.ticks_ms()
+            gap_ms = time.ticks_diff(now, _last_feed_ms)
+            if gap_ms > 20000:
+                logger.warn("wdt: gap={}ms op={} (APPROACHING TIMEOUT)".format(
+                    gap_ms, _current_op))
+            else:
+                logger.info("wdt: gap={}ms op={}".format(gap_ms, _current_op))
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:
+            try:
+                logger.warn("wdt_canary iter failed: {} ({})".format(
+                    type(e).__name__, e))
+            except Exception:
+                pass
+        await asyncio.sleep(interval_s)
 
 
 async def display_loop(display, sensor_matrix, interval_ms=66):
@@ -177,8 +239,10 @@ async def display_loop(display, sensor_matrix, interval_ms=66):
     while True:
         try:
             display.draw_sensor_matrix(sensor_matrix.matrix)
-        except Exception as e:
-            logger.warn("display_loop draw failed: {}".format(e))
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:
+            logger.warn("display_loop draw failed: {} ({})".format(type(e).__name__, e))
         await asyncio.sleep_ms(interval_ms)
 
 
@@ -187,8 +251,10 @@ async def menu_loop(menu):
     while True:
         try:
             menu.check_buttons()
-        except Exception as e:
-            logger.warn("menu_loop check failed: {}".format(e))
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:
+            logger.warn("menu_loop check failed: {} ({})".format(type(e).__name__, e))
         await asyncio.sleep_ms(50)
 
 
@@ -217,8 +283,10 @@ async def status_loop(state, power, network, imu, interval_s=5):
             subs = state.subscribers.count()
             logger.info("BAT {:.2f}V ({}%) up={}s rssi={} mem={} subs={} {}".format(
                 v, p, uptime_s, rssi, free_mem, subs, wifi))
-        except Exception as e:
-            logger.warn("status_loop iter failed: {}".format(e))
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:
+            logger.warn("status_loop iter failed: {} ({})".format(type(e).__name__, e))
         await asyncio.sleep(interval_s)
 
 
@@ -230,8 +298,10 @@ async def subscriber_prune_loop(subscribers, interval_s=1):
             if dropped:
                 logger.info("Pruned {} stale subscriber(s); remaining={}".format(
                     dropped, subscribers.count()))
-        except Exception as e:
-            logger.warn("subscriber_prune_loop failed: {}".format(e))
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:
+            logger.warn("subscriber_prune_loop failed: {} ({})".format(type(e).__name__, e))
         await asyncio.sleep(interval_s)
 
 
@@ -264,8 +334,10 @@ async def status_led_loop(state, status_led, network, interval_ms=33):
                 # Booted, Wi-Fi up, never subscribed yet.
                 status_led.set_state("boot")
             status_led.animate(now_ms)
-        except Exception as e:
-            logger.warn("status_led_loop failed: {}".format(e))
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:
+            logger.warn("status_led_loop failed: {} ({})".format(type(e).__name__, e))
         await asyncio.sleep_ms(interval_ms)
 
 
@@ -273,7 +345,15 @@ async def gc_loop(interval_s=2):
     """Manual GC pacing. ESP32 MicroPython tends to let the heap fragment
     under steady allocation pressure; periodic explicit collect keeps it flat."""
     while True:
-        gc.collect()
+        try:
+            gc.collect()
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:
+            try:
+                logger.warn("gc_loop failed: {} ({})".format(type(e).__name__, e))
+            except Exception:
+                pass
         await asyncio.sleep(interval_s)
 
 
@@ -281,10 +361,15 @@ async def reboot_watcher(state):
     """Poll the reboot flag set by a `reboot` command. We sleep briefly so
     the ack can flush, then soft_reset."""
     while True:
-        if state.reboot_requested:
-            logger.info("Soft-resetting in 500 ms...")
-            await asyncio.sleep_ms(500)
-            machine.soft_reset()
+        try:
+            if state.reboot_requested:
+                logger.info("Soft-resetting in 500 ms...")
+                await asyncio.sleep_ms(500)
+                machine.soft_reset()
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:
+            logger.warn("reboot_watcher failed: {} ({})".format(type(e).__name__, e))
         await asyncio.sleep_ms(200)
 
 
@@ -431,6 +516,10 @@ async def main():
     asyncio.create_task(status_led_loop(state, status_led, network))
     asyncio.create_task(gc_loop())
     asyncio.create_task(reboot_watcher(state))
+    # Diagnostic for the V4 WDT-reset mystery (#0156). Logs gap-since-feed +
+    # the current sensor_loop step every 5 s. On a WDT reset, the last
+    # canary log line before reboot is the leading edge of the stall.
+    asyncio.create_task(wdt_canary_loop())
 
     # STA-mode provisioning admin: serves GET /info and POST /reprovision
     # on TCP 80 against the device's LAN IP, per PROVISIONING.md section
