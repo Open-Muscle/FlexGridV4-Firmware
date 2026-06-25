@@ -45,18 +45,35 @@ from sd_logger        import SDLogger
 import provisioning
 
 
-# Reset-cause names. ESP32-S3 MicroPython exposes the abstracted constants;
-# brownout typically surfaces as PWRON_RESET (1) on this build, since the
-# brownout detector reboots through the same path. If you see PWRON_RESET
-# at an inconvenient time mid-recording, suspect a Wi-Fi-TX-burst brownout.
-_RESET_CAUSES = {
-    1: "POWER_ON",     # cold boot OR brownout on ESP32-S3
-    2: "HARD",         # external RST line / chip enable
-    3: "WDT",          # watchdog timeout, task got stuck
-    4: "DEEPSLEEP",
-    5: "SOFT",         # Ctrl-D / machine.soft_reset()
-    6: "BROWNOUT",     # some builds use this; treat as suspect
-}
+# Reset-cause names, built from the named machine.* constants instead of
+# integer literals so we stay correct across MicroPython builds whose
+# integer values differ. Audit-pass fix (board #0189 / #0191): the old
+# dict had `6: "BROWNOUT"` which is wrong on ESP32-S3 (brownout surfaces
+# as PWRON_RESET=1 here, since the brownout detector reboots through the
+# same path; if you see PWRON_RESET mid-recording, suspect a Wi-Fi-TX-burst
+# brownout). Using attrgetter-style lookup also future-proofs against
+# value shifts between MicroPython versions.
+def _build_reset_causes():
+    names = ("PWRON_RESET", "HARD_RESET", "WDT_RESET",
+             "DEEPSLEEP_RESET", "SOFT_RESET", "BROWNOUT_RESET")
+    pretty = {
+        "PWRON_RESET":     "POWER_ON",   # cold boot OR brownout on ESP32-S3
+        "HARD_RESET":      "HARD",       # external RST line / chip enable
+        "WDT_RESET":       "WDT",        # watchdog timeout, task got stuck
+        "DEEPSLEEP_RESET": "DEEPSLEEP",
+        "SOFT_RESET":      "SOFT",       # Ctrl-D / machine.soft_reset()
+        "BROWNOUT_RESET":  "BROWNOUT",   # not on ESP32-S3, present on others
+    }
+    d = {}
+    for n in names:
+        try:
+            d[getattr(machine, n)] = pretty[n]
+        except AttributeError:
+            pass  # not all MicroPython builds expose every constant
+    return d
+
+
+_RESET_CAUSES = _build_reset_causes()
 
 
 # Watchdog timeout in ms. sensor_loop feeds it every iteration; if anything
