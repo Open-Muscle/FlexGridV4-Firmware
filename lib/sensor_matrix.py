@@ -113,14 +113,73 @@ class SensorMatrix:
         """
         Row-outer, col-inner scan with mux-gated address changes and
         per-cell row discharge. Returns the pre-allocated matrix.
+
+        v0.1.9 (60 Hz profile, board #0185): _select_column and
+        _discharge_and_read INLINED into the hot loop, with self.*
+        attribute lookups hoisted into locals. MicroPython method-call
+        overhead is ~30us per call; per-cell attribute lookups are
+        another few us each. For 60 cells these added ~3-4 ms to
+        scan_matrix. The inlined code does exactly what the helper
+        methods do (no behavior change), just without the Python-level
+        call dispatch and dict lookups. The helpers remain on the
+        class for external callers.
         """
-        m = self.matrix
-        for row in range(self.num_rows):
-            self._set_row_mode(row)
-            for col in range(self.num_cols):
-                self._select_column(col)
-                m[col][row] = self._discharge_and_read(row)
+        # Hoist into locals once per scan; the hot loop reads these as
+        # local-variable access (a single bytecode) rather than chasing
+        # self.<attr>.<attr> dict lookups every cell.
+        m              = self.matrix
+        S0, S1, S2, S3 = self.S[0], self.S[1], self.S[2], self.S[3]
+        mux_en         = self.mux_en
+        row_pins       = self.row_pins
+        adc            = self.adc
+        num_cols       = self.num_cols
+        num_rows       = self.num_rows
+        discharge_us   = self.discharge_us
+        settle_us      = self.settle_us
+        addr_settle_us = self.addr_settle_us
+        avg_samples    = self.avg_samples
+        sleep_us       = time.sleep_us
+        PIN_OUT        = Pin.OUT
+        PIN_IN         = Pin.IN
+
+        for row in range(num_rows):
+            # Row-mode change: target row = INPUT (ADC), others = OUTPUT LOW.
+            for i in range(num_rows):
+                if i == row:
+                    row_pins[i].init(PIN_IN)
+                else:
+                    row_pins[i].init(PIN_OUT, value=0)
+            row_pin = row_pins[row]
+            row_adc = adc[row]
+
+            for col in range(num_cols):
+                # Inlined _select_column.
+                mux_en.value(1)
+                S0.value(col & 0x1)
+                S1.value((col >> 1) & 0x1)
+                S2.value((col >> 2) & 0x1)
+                S3.value((col >> 3) & 0x1)
+                if addr_settle_us:
+                    sleep_us(addr_settle_us)
+                mux_en.value(0)
+
+                # Inlined _discharge_and_read.
+                row_pin.init(PIN_OUT, value=0)
+                if discharge_us:
+                    sleep_us(discharge_us)
+                row_pin.init(PIN_IN)
+                if settle_us:
+                    sleep_us(settle_us)
+                row_adc.read()  # discard stale SAH-cap sample
+                if avg_samples <= 1:
+                    m[col][row] = row_adc.read()
+                else:
+                    s = 0
+                    for _ in range(avg_samples):
+                        s += row_adc.read()
+                    m[col][row] = s // avg_samples
+
         # Park rows as inputs so external code can read ADCs freely.
-        for p in self.row_pins:
-            p.init(Pin.IN)
+        for p in row_pins:
+            p.init(PIN_IN)
         return m

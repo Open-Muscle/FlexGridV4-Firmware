@@ -19,7 +19,6 @@ BAUD = 115200
 # (local_path, remote_path) tuples to push
 PUSH_LIST = [
     ("lib/sensor_matrix.py", "/lib/sensor_matrix.py"),
-    ("flexgrid.py",          "/flexgrid.py"),
 ]
 
 
