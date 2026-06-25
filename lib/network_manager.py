@@ -109,17 +109,22 @@ class NetworkManager:
             logger.info("Wi-Fi connected; UDP socket (re)created -> " + self.sta.ifconfig()[0])
         return True
 
-    def _build_sensor_packet(self, matrix, meta=None):
+    def _build_sensor_packet(self, matrix, meta=None, imu=None):
         """Wrap a 2D sensor matrix in the v1.0 envelope. Adds the rolling
-        seq number so the hub can detect dropped frames."""
+        seq number so the hub can detect dropped frames. Optional `imu`
+        (a dict carrying accel + gyro keys) rides in `data.imu` so hubs
+        get high-rate IMU on the sensor channel; see PROTOCOL.md 7.1."""
         self._seq = (self._seq + 1) & 0xFFFF
+        data = {"matrix": matrix}
+        if imu is not None:
+            data["imu"] = imu
         pkt = {
             "v":    PROTOCOL_VERSION,
             "type": self.device_type,
             "id":   self.device_id,
             "ts":   time.ticks_ms(),
             "seq":  self._seq,
-            "data": {"matrix": matrix},
+            "data": data,
         }
         if meta:
             pkt["meta"] = meta
@@ -136,20 +141,24 @@ class NetworkManager:
             "meta": status,
         }
 
-    async def send_sensor(self, matrix, meta=None):
+    async def send_sensor(self, matrix, meta=None, imu=None):
         """Send a sensor frame to every Wi-Fi subscriber.
 
         If no subscribers are registered we skip the JSON encode entirely.
         This matters: an idle band can be scanning at 50 Hz indefinitely
         and we do not want to spend CPU on packet construction with nobody
         to receive it.
+
+        `imu`, when given, rides in `data.imu` per PROTOCOL.md 7.1 so hubs
+        receive high-rate IMU samples without parsing the slower status
+        meta path.
         """
         targets = self.subscribers.wifi_targets()
         if not targets:
             return
         if not self._ensure_socket_fresh_if_reconnected():
             return
-        pkt = self._build_sensor_packet(matrix, meta=meta)
+        pkt = self._build_sensor_packet(matrix, meta=meta, imu=imu)
         payload = ujson.dumps(pkt).encode("utf-8")
         for host, port in targets:
             try:

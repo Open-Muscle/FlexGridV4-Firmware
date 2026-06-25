@@ -127,6 +127,13 @@ class _DeviceState:
         self.scan_interval_ms = settings.get("scan_interval_ms", 20)
         self.streaming        = True
         self.reboot_requested = False
+        # IMU cache populated by imu_loop and consumed by sensor_loop +
+        # status_loop. None when the IMU is absent or has not produced a
+        # successful read yet. Shape: {"accel": [ax,ay,az], "gyro":
+        # [gx,gy,gz]} per PROTOCOL.md 7.1 data.imu. Single writer
+        # (imu_loop), multiple lockless readers (MicroPython is single-
+        # threaded so dict-replace is atomic from the consumer's view).
+        self.imu_cache        = None
 
     def set_scan_interval(self, ms):
         self.scan_interval_ms = int(ms)
@@ -187,7 +194,11 @@ async def sensor_loop(state, sensor_matrix, network, sd):
             if state.streaming:
                 _current_op = "send_sensor"
                 meta = device_status if (n % meta_every == 0) else None
-                await network.send_sensor(matrix, meta=meta)
+                # data.imu rides every frame at the current sensor rate when
+                # the cache is populated (imu_loop is the sole writer). Hubs
+                # use this for smooth orientation viz; the slower meta.imu
+                # path is back-compat for hubs that have not migrated.
+                await network.send_sensor(matrix, meta=meta, imu=state.imu_cache)
             # SD recording is independent of streaming; the user may want
             # to log offline while no hub is around.
             if sd.is_recording():
@@ -202,6 +213,38 @@ async def sensor_loop(state, sensor_matrix, network, sd):
                 logger.error("sensor_loop iter #{} op={} failed: {} ({})".format(
                     err_count, _current_op, type(e).__name__, e))
             err_count += 1
+        await asyncio.sleep_ms(interval_ms)
+
+
+async def imu_loop(state, imu, interval_ms=33):
+    """Read the IMU at a fixed cadence and publish to state.imu_cache for
+    sensor_loop (high-rate data.imu) and status_loop (back-compat meta.imu).
+    Sole I2C reader for the IMU so there is no bus contention between this
+    and sensor_loop's matrix scan.
+
+    Default 33 ms = ~30 Hz IMU read cadence. PROTOCOL.md 7.1 data.imu rides
+    each sensor frame at whatever rate sensor_loop fires, so the effective
+    hub-side IMU cadence is min(imu_loop rate, sensor_loop rate). Overseer
+    target is 60 Hz on the sensor frame; this loop is configured at half
+    that (30 Hz) which is smooth enough for orientation while halving the
+    I2C traffic. Bump to 16 ms (60 Hz) if a smoother readout is needed.
+
+    Catches BaseException so an I2C glitch cannot silently kill the task."""
+    while True:
+        try:
+            if imu.present and imu.read():
+                state.imu_cache = {
+                    "accel": [imu.last["ax"], imu.last["ay"], imu.last["az"]],
+                    "gyro":  [imu.last["gx"], imu.last["gy"], imu.last["gz"]],
+                }
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:
+            try:
+                logger.warn("imu_loop iter failed: {} ({})".format(
+                    type(e).__name__, e))
+            except Exception:
+                pass
         await asyncio.sleep_ms(interval_ms)
 
 
@@ -261,7 +304,12 @@ async def menu_loop(menu):
 async def status_loop(state, power, network, imu, interval_s=5):
     """Refresh `device_status` and emit a REPL heartbeat. The dict is
     consumed by sensor_loop (attached as packet meta) and by status_led_loop
-    (drives the connection-state palette)."""
+    (drives the connection-state palette).
+
+    Does NOT call imu.read() any more (board #0163 IMU-in-data work):
+    imu_loop is the sole I2C reader and writes state.imu_cache. status_loop
+    just snapshots imu.status_summary() to keep the meta.imu path populated
+    for back-compat hubs that have not migrated to data.imu yet."""
     while True:
         try:
             v = power.battery_voltage()
@@ -269,7 +317,7 @@ async def status_loop(state, power, network, imu, interval_s=5):
             uptime_s = time.ticks_ms() // 1000
             free_mem = gc.mem_free()
             rssi = network.rssi()
-            imu_snap = imu.read() and imu.status_summary()
+            imu_snap = imu.status_summary() if imu.present else None
 
             device_status["vbat"]        = round(v, 3)
             device_status["pct"]         = p
@@ -511,6 +559,11 @@ async def main():
     asyncio.create_task(menu_loop(menu))
     asyncio.create_task(status_loop(state, power, network, imu,
                                     settings.get("status_interval_s", 5)))
+    # imu_loop is the sole I2C reader of the IMU; sensor_loop + status_loop
+    # consume from state.imu_cache. Default 30 Hz read cadence; data.imu
+    # then rides each sensor frame at the sensor rate (PROTOCOL.md 7.1).
+    asyncio.create_task(imu_loop(state, imu,
+                                 settings.get("imu_interval_ms", 33)))
     asyncio.create_task(discovery.announce_loop())
     asyncio.create_task(subscriber_prune_loop(subscribers))
     asyncio.create_task(status_led_loop(state, status_led, network))
