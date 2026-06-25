@@ -108,5 +108,15 @@ class SettingsManager:
                 json.dump(settings, f)
             return True
         except Exception as e:
+            # Print so it's visible on a connected UART AND log so it's
+            # captured in the persistent log for unattended failures
+            # (e.g. flash full, FS corruption mid-provisioning). Audit
+            # pass per board #0188.
             print("[ERR] Could not save settings:", e)
+            try:
+                import logger
+                logger.error("settings.save failed: {} ({})".format(
+                    type(e).__name__, e))
+            except Exception:
+                pass
             return False
