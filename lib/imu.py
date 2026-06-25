@@ -163,10 +163,16 @@ class IMU:
         self.last["gx"]     = _sign16_le(buf[6], buf[7])
         self.last["gy"]     = _sign16_le(buf[8], buf[9])
         self.last["gz"]     = _sign16_le(buf[10], buf[11])
-        # TOKMAS temp is 16-bit raw counts; conversion needs the per-chip
-        # ROOM_TEMP offset register (0x29-0x2A) and the formula
-        # T_c = (TEMP_DATA - ROOM_TEMP)/14 + 25. We expose raw for now.
-        self.last["temp_c"] = float(_sign16_le(buf[12], buf[13]))
+        # TOKMAS temp conversion is not documented in the LCSC datasheet in a
+        # way we can ship: the formula T_c = (TEMP_DATA - ROOM_TEMP)/14 + 25
+        # needs the per-chip ROOM_TEMP offset from registers 0x29-0x2A AND a
+        # confirmed slope, neither verified on hardware. Exposing the raw
+        # signed-16 count as Celsius is wrong (phone saw -1894 C live;
+        # board #0156). Until the formula is verified end-to-end on a TOKMAS
+        # part, surface temp_c as None so downstream consumers can hide it
+        # rather than display garbage. Phone is already guarding.
+        # TODO: read ROOM_TEMP once at init() and apply the formula here.
+        self.last["temp_c"] = None
         return self.last
 
     # ---- summary for status meta ----------------------------------------------
