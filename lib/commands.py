@@ -82,7 +82,7 @@ class CommandServer:
                 # than one huge sleep so a cancel surfaces promptly.
                 while True:
                     await asyncio.sleep(60)
-            except _CancelledError:
+            except (_CancelledError, SystemExit):
                 logger.info("Command server cancelled; exiting supervisor")
                 raise
             except BaseException as e:
@@ -111,7 +111,7 @@ class CommandServer:
                 ack = await self._handle_one(line, peer)
                 writer.write(ujson.dumps(ack).encode("utf-8") + b"\n")
                 await writer.drain()
-        except _CancelledError:
+        except (_CancelledError, SystemExit):
             # Deliberate shutdown of this client task; clean up and re-raise.
             raise
         except BaseException as e:
@@ -161,12 +161,20 @@ class CommandServer:
 
         try:
             ack_data = await handler(data, peer)
-        except Exception as e:
-            logger.warn("Command verb={} from {} raised: {}".format(verb, peer, e))
+        except (_CancelledError, SystemExit):
+            # Let deliberate cancel / soft_reset propagate past the dispatch
+            # so the asyncio runtime can act on them (e.g. machine.soft_reset
+            # raises SystemExit; we must not catch it here, mirrors the
+            # SystemExit fix in 71e0eae for the loop boundaries).
+            raise
+        except BaseException as e:
+            logger.warn("Command verb={} from {} raised: {} ({})".format(
+                verb, peer, type(e).__name__, e))
             return {
                 "v": "1.0", "type": "ack", "status": _ERR,
                 "msg_id": msg_id,
-                "data": {"verb": verb, "message": str(e)},
+                "data": {"verb": verb,
+                         "message": "{}: {}".format(type(e).__name__, e)},
             }
         return {
             "v": "1.0", "type": "ack", "status": _OK,

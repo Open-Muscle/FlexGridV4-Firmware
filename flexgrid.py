@@ -98,14 +98,21 @@ _current_op   = "boot"
 
 def _feed_wdt():
     global _last_feed_ms
+    # Catch BaseException defensively: if ticks_ms or _wdt.feed ever raises a
+    # BaseException (MemoryError, asyncio internals, etc.) we still want the
+    # canary to report a stale gap rather than the call to propagate up
+    # through whatever loop invoked us. SystemExit + CancelledError do
+    # propagate (no catch covers them) since this is a sync function.
     try:
         _last_feed_ms = time.ticks_ms()
-    except Exception:
+    except (SystemExit, KeyboardInterrupt):
+        pass  # already at module-level, can't propagate cleanly
+    except BaseException:
         pass
     if _wdt is not None:
         try:
             _wdt.feed()
-        except Exception:
+        except BaseException:
             pass
 
 
