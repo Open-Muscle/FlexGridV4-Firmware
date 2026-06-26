@@ -225,7 +225,7 @@ def build_handlers(device_state):
         return {"refreshed": refreshed}
 
     async def get_info(data, peer):
-        return {
+        reply = {
             "id":         device_state.device_id,
             "dev":        device_state.device_type,
             "fw":         device_state.fw_version,
@@ -233,6 +233,13 @@ def build_handlers(device_state):
             "caps":       list(device_state.caps),
             "subscribers": device_state.subscribers.snapshot(),
         }
+        # Optional imu chip + per-LSB scale so hubs can normalize data.imu
+        # raw counts across mixed-fleet sources (overseer #0217). Key
+        # absent when no IMU is present, so legacy hubs see no change.
+        imu_scale = getattr(device_state, "imu_scale", None)
+        if imu_scale:
+            reply["imu"] = dict(imu_scale)
+        return reply
 
     async def set_scan_rate(data, peer):
         ms = int(data["interval_ms"])

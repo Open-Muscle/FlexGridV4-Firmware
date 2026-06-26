@@ -158,6 +158,11 @@ class _DeviceState:
         # (imu_loop), multiple lockless readers (MicroPython is single-
         # threaded so dict-replace is atomic from the consumer's view).
         self.imu_cache        = None
+        # IMU chip + per-LSB scale advertised in announce + get_info so
+        # the hub fusion normalizes data.imu raw counts across mixed-fleet
+        # sources (overseer #0217; closes vrpc #0200/#0210 gyro-scale ask).
+        # None when no IMU is present. Set by main() after imu.init() lands.
+        self.imu_scale        = None
 
     def set_scan_interval(self, ms):
         self.scan_interval_ms = int(ms)
@@ -577,6 +582,10 @@ async def main():
 
     # DeviceState carries the live mutable state command handlers may mutate.
     state = _DeviceState(settings, subscribers)
+    # Cache the IMU scale once on _DeviceState so announce + get_info pick
+    # it up without each having to ask the imu instance. Stays None on
+    # boards where the IMU isn't present, which keeps the field optional.
+    state.imu_scale = imu.scale_dict() if imu.present else None
 
     display.text_screen([
         "OpenMuscle",
@@ -603,6 +612,7 @@ async def main():
         },
         caps=state.caps,
         matrix_dims=state.matrix_dims,
+        imu_scale=state.imu_scale,
     )
 
     # Command channel: hubs subscribe + send commands here. The handlers

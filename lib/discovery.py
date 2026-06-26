@@ -31,7 +31,8 @@ BROADCAST_PORT_DEFAULT = 3140
 
 
 class Discovery:
-    def __init__(self, settings, subscribers, sta, services, caps, matrix_dims):
+    def __init__(self, settings, subscribers, sta, services, caps, matrix_dims,
+                 imu_scale=None):
         """
         settings: the loaded settings dict (gives device_id, mdns_service, etc.)
         subscribers: lib.subscribers.Subscribers instance
@@ -39,6 +40,11 @@ class Discovery:
         services: dict mapping capability name -> port, e.g. {"sensor": 3141, "cmd": 8001}
         caps: list of capability strings advertised in the announce
         matrix_dims: tuple (cols, rows) for the sensor matrix
+        imu_scale: optional {chip, gyro_dps_per_lsb, accel_g_per_lsb} dict
+                   from imu.scale_dict(); folded into the announce payload
+                   under the "imu" key so hubs can normalize data.imu raw
+                   counts to a common unit without an extra get_info round
+                   trip. Omitted (key absent) when no IMU is present.
         """
         self.settings = settings
         self.subscribers = subscribers
@@ -46,6 +52,7 @@ class Discovery:
         self.services = services
         self.caps = caps
         self.matrix_dims = matrix_dims
+        self.imu_scale = imu_scale
 
         self.device_id = settings["device_id"]
         self.device_type = settings["device_type"]
@@ -75,7 +82,7 @@ class Discovery:
         it from the packet source address (UDP broadcast) or from the mDNS A
         record. This is intentional per spec section 4.1: 'The IP is never in
         the announce; the listener takes it from the packet/mDNS source'."""
-        return {
+        pkt = {
             "v":         "1.0",
             "type":      "announce",
             "id":        self.device_id,
@@ -88,6 +95,9 @@ class Discovery:
             "services":  dict(self.services),
             "ts":        time.ticks_ms(),
         }
+        if self.imu_scale:
+            pkt["imu"] = dict(self.imu_scale)
+        return pkt
 
     def register_mdns(self):
         """Best-effort mDNS registration. Tries the network.mDNS / mdns_service
