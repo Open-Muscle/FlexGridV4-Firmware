@@ -262,7 +262,10 @@ async def sensor_loop(state, sensor_matrix, network, sd):
                 avg_iter = _p_iter_us // _p_count
                 # Effective rate from real iter time: 1e6 / avg_iter_us
                 rate_hz = (1000000 // avg_iter) if avg_iter > 0 else 0
-                logger.info(
+                # Demoted to debug (board #0192): persisting this every
+                # PROFILE_WINDOW frames dominated flash writes + caused
+                # 1s asyncio stalls. Still on stdout for live diagnosis.
+                logger.debug(
                     "rate: scan={}us emit={}us iter={}us interval={}ms streaming={} rate={}Hz".format(
                         avg_scan, avg_emit, avg_iter, interval_ms,
                         state.streaming, rate_hz))
@@ -325,7 +328,9 @@ async def wdt_canary_loop(interval_s=5):
                 logger.warn("wdt: gap={}ms op={} (APPROACHING TIMEOUT)".format(
                     gap_ms, _current_op))
             else:
-                logger.info("wdt: gap={}ms op={}".format(gap_ms, _current_op))
+                # Demoted to debug (board #0192): canary fires every 5s
+                # and was flushing flash on every emit.
+                logger.debug("wdt: gap={}ms op={}".format(gap_ms, _current_op))
         except (asyncio.CancelledError, SystemExit):
             raise
         except BaseException as e:
@@ -398,7 +403,9 @@ async def status_loop(state, power, network, imu, interval_s=5):
 
             wifi = "WiFi:ok" if network.is_connected() else "WiFi:--"
             subs = state.subscribers.count()
-            logger.info("BAT {:.2f}V ({}%) up={}s rssi={} mem={} subs={} {}".format(
+            # Demoted to debug (board #0192): periodic status line; the
+            # status frame on the wire carries the same data for hubs.
+            logger.debug("BAT {:.2f}V ({}%) up={}s rssi={} mem={} subs={} {}".format(
                 v, p, uptime_s, rssi, free_mem, subs, wifi))
         except (asyncio.CancelledError, SystemExit):
             raise
@@ -516,6 +523,21 @@ async def main():
         uos.mkdir('config')
 
     settings = SettingsManager.load()
+
+    # boot_seq: monotonic per-device restart counter, persisted so that a
+    # phone seeing the announce can detect a fresh boot (counter jumped)
+    # and flush cached subscription state (PROTOCOL.md section 5.6).
+    # Bumped once here, before any subsystem that reads the announce
+    # envelope is constructed, and persisted via SettingsManager so the
+    # value survives reboot. The save is the only flash write this path
+    # makes; cheap.
+    settings["boot_seq"] = int(settings.get("boot_seq", 0)) + 1
+    try:
+        SettingsManager.save(settings)
+    except Exception as e:
+        logger.warn("boot_seq persist failed (non-fatal): {}".format(e))
+    logger.info("boot_seq: {}".format(settings["boot_seq"]))
+
     redacted = {k: ("<redacted>" if k in ("wifi_password", "provisioning_psk") else v)
                 for k, v in settings.items()}
     logger.info("Settings: {}".format(redacted))
@@ -639,6 +661,11 @@ async def main():
     asyncio.create_task(imu_loop(state, imu,
                                  settings.get("imu_interval_ms", 33)))
     asyncio.create_task(discovery.announce_loop())
+    # Active discovery listener: phones broadcast {verb:"discover"} on the
+    # announce port and we reply with an immediate announce. Catches the
+    # "phone just joined a new network and does not want to wait up to a
+    # full beacon interval" case. See PROTOCOL.md section 5.5.
+    asyncio.create_task(discovery.discover_listener_loop())
     asyncio.create_task(subscriber_prune_loop(subscribers))
     asyncio.create_task(status_led_loop(state, status_led, network))
     asyncio.create_task(gc_loop())

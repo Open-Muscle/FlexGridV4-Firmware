@@ -29,6 +29,10 @@ import logger
 
 BROADCAST_PORT_DEFAULT = 3140
 
+# Cooperative-yield interval for the discover listener loop. Keeps the
+# socket polling cheap while still responding to a probe within ~50 ms.
+_DISCOVER_POLL_MS = 50
+
 
 class Discovery:
     def __init__(self, settings, subscribers, sta, services, caps, matrix_dims,
@@ -64,6 +68,13 @@ class Discovery:
         # BROADCAST_PORT_DEFAULT fallback (now 3140) covers that.
         self.beacon_port = settings.get("udp_announce_port", BROADCAST_PORT_DEFAULT)
         self.announce_interval_s = settings.get("announce_interval_s", 1)
+        # boot_seq is a monotonic restart counter persisted in settings.json
+        # and incremented once per boot (in flexgrid.py main() before the
+        # Discovery instance is constructed). Hubs include it on every
+        # announce so a phone can detect a fresh boot vs same session and
+        # flush cached subscription state. Default 0 keeps the field
+        # well-defined on settings.json files that pre-date this addition.
+        self.boot_seq = int(settings.get("boot_seq", 0))
 
         # Sender socket for the broadcast beacon. Created once, reused.
         self._beacon_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -72,6 +83,26 @@ class Discovery:
             self._beacon_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         except Exception as e:
             logger.warn("SO_BROADCAST setsockopt failed: {}".format(e))
+
+        # Listener socket for {verb:"discover"} probes. Bound on the
+        # announce port (3140) so a phone joining a new network can
+        # actively pull an announce instead of waiting up to one beacon
+        # interval. SO_REUSEADDR is best-effort -- some MicroPython
+        # builds do not expose it but the bind still succeeds on ESP32
+        # lwIP because no other socket has the port bound.
+        self._discover_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            self._discover_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        except Exception:
+            pass
+        try:
+            self._discover_sock.bind(("", self.beacon_port))
+            self._discover_sock.setblocking(False)
+            self._discover_listen_ok = True
+        except OSError as e:
+            logger.warn("Discover listener bind failed (errno={}); active discovery disabled".format(
+                getattr(e, "errno", None) or (e.args[0] if e.args else None)))
+            self._discover_listen_ok = False
 
         # mDNS state. Whether we registered, and how, is best-effort; the
         # broadcast beacon is the reliable path.
@@ -94,6 +125,10 @@ class Discovery:
             "matrix":    list(self.matrix_dims),
             "services":  dict(self.services),
             "ts":        time.ticks_ms(),
+            # boot_seq lets a phone detect that the device just rebooted
+            # (counter jumped) so it can drop any cached subscription
+            # state and re-subscribe cleanly. Monotonic per-device.
+            "boot_seq":  self.boot_seq,
         }
         if self.imu_scale:
             pkt["imu"] = dict(self.imu_scale)
@@ -216,3 +251,83 @@ class Discovery:
                 logger.warn("Beacon send failed: errno={} {}".format(errno, e))
         except Exception as e:
             logger.warn("Beacon send unexpected error: {}".format(e))
+
+    async def discover_listener_loop(self):
+        """Listen on the announce port for active discovery probes from
+        phones/hubs and respond with an immediate announce.
+
+        Wire shape of an accepted probe (PROTOCOL.md section 5.5):
+            {"v":"1.0", "type":"cmd", "data":{"verb":"discover"}}
+
+        Sent to 255.255.255.255:3140 (broadcast) by a phone that just
+        joined a new Wi-Fi network and does not want to wait up to one
+        beacon interval for the periodic announce. On receipt we:
+          1. Broadcast an announce (reaches every hub bound to 3140 on
+             the link, same path as the periodic beacon).
+          2. Unicast a copy to the prober's (host, port) tuple as a
+             belt-and-suspenders backup -- if the phone sent its probe
+             from an ephemeral port and is not bound to 3140, the
+             broadcast would not reach it but the unicast will.
+
+        Cooperative-yield every _DISCOVER_POLL_MS so the loop is cheap
+        even when no probes are arriving. Hardened with the same
+        SystemExit/CancelledError re-raise + BaseException catch as the
+        rest of the device's loops (board #0166).
+
+        Skips silently if the listen socket failed to bind at init
+        (some networks block binding the same port a sender is
+        broadcasting from; rare on ESP32 lwIP but possible).
+        """
+        if not self._discover_listen_ok:
+            logger.warn("discover_listener_loop: socket not bound; exiting task")
+            return
+        while True:
+            try:
+                while True:
+                    try:
+                        data, addr = self._discover_sock.recvfrom(1024)
+                    except OSError:
+                        # No data ready; drop out of the inner drain loop
+                        # and yield. EAGAIN/EWOULDBLOCK on a non-blocking
+                        # socket is the normal idle case.
+                        break
+                    self._handle_discover(data, addr)
+            except (asyncio.CancelledError, SystemExit):
+                raise
+            except BaseException as e:
+                logger.warn("discover_listener iter failed: {} ({})".format(
+                    type(e).__name__, e))
+            await asyncio.sleep_ms(_DISCOVER_POLL_MS)
+
+    def _handle_discover(self, data, addr):
+        """Parse one received UDP packet on the announce port. If it is a
+        discover probe, broadcast + unicast an immediate announce.
+
+        Anything else (the device's own broadcast announce echoed back,
+        a malformed packet, a stray UDP datagram from another protocol)
+        is silently ignored. Defensive: parsing is wrapped so a malformed
+        payload cannot kill the listener."""
+        try:
+            msg = ujson.loads(data)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(msg, dict):
+            return
+        if msg.get("type") != "cmd":
+            return
+        verb = msg.get("data", {}).get("verb") if isinstance(msg.get("data"), dict) else None
+        if verb != "discover":
+            return
+
+        payload = ujson.dumps(self._announce_payload()).encode("utf-8")
+        # Broadcast: reaches every hub already listening on the announce
+        # port on this link segment.
+        try:
+            self._beacon_sock.sendto(payload, ("255.255.255.255", self.beacon_port))
+        except OSError:
+            pass
+        # Unicast: also reaches a prober that bound to an ephemeral port.
+        try:
+            self._discover_sock.sendto(payload, addr)
+        except OSError:
+            pass

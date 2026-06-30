@@ -61,6 +61,11 @@ class SettingsManager:
         "announce_interval_s": 1,              # how often to broadcast the fallback beacon while unsubscribed
         "max_subscribers":   4,                # spec section 5.1
         "heartbeat_timeout_s": 5,              # drop subscribers older than this
+        # Monotonic restart counter; incremented once per boot in
+        # flexgrid.py main() so the announce envelope carries it
+        # (PROTOCOL.md section 5.6) and phones can detect a fresh boot
+        # vs same session, flushing cached subscription state.
+        "boot_seq":          0,
 
         # Sensor scan
         "scan_interval_ms":  20,               # ~50 Hz default; can be tuned via cmd
