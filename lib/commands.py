@@ -239,6 +239,18 @@ def build_handlers(device_state):
         imu_scale = getattr(device_state, "imu_scale", None)
         if imu_scale:
             reply["imu"] = dict(imu_scale)
+        # Optional role tag (board #0220). Omitted from reply when the
+        # device has no role assigned so a phone can detect "unassigned"
+        # by the field's absence and prompt the user to tag it.
+        role = getattr(device_state, "role", "") or ""
+        if role:
+            reply["role"] = role
+        # Optional power_mode tag so the phone can show the same
+        # STREAM/STANDBY/CHARGE state in its UI. Always present when
+        # the device implements the power-mode state machine.
+        pm = getattr(device_state, "power_mode", None)
+        if pm:
+            reply["power_mode"] = pm
         return reply
 
     async def set_scan_rate(data, peer):
@@ -260,6 +272,30 @@ def build_handlers(device_state):
         device_state.request_reboot()
         return {"rebooting": True}
 
+    async def set_role(data, peer):
+        """Hub-pushed role assignment (board #0220). Stored in
+        device_state + persisted to settings so the role survives
+        reboot. Drives the idle-LED hue (BLUE left, RED right,
+        GREEN labeler, WHITE unassigned).
+
+        Valid values: 'left' / 'right' / 'labeler' / '' (clear).
+        Unknown values get clamped to '' inside DeviceState.set_role
+        so a buggy hub cannot wedge the device into an undefined LED
+        state. Persistence is best-effort; a flash write failure is
+        logged but does not error the verb."""
+        role = data.get("role", "")
+        device_state.set_role(role)
+        # Persist via the SettingsManager-attached save callback if the
+        # device_state exposes one. The flexgrid wiring sets this in
+        # main() before serve_forever spins up.
+        save = getattr(device_state, "save_settings", None)
+        if save is not None:
+            try:
+                save("role", device_state.role)
+            except Exception as e:
+                logger.warn("set_role persist failed: {}".format(e))
+        return {"role": device_state.role}
+
     return {
         "subscribe":     subscribe,
         "unsubscribe":   unsubscribe,
@@ -269,4 +305,5 @@ def build_handlers(device_state):
         "start_stream":  start_stream,
         "stop_stream":   stop_stream,
         "reboot":        reboot,
+        "set_role":      set_role,
     }

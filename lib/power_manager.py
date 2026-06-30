@@ -31,6 +31,20 @@ class PowerManager:
     LIPO_FULL = 4.20
     LIPO_EMPTY = 3.50
 
+    # VBUS-present heuristic (board #0220): V4 does not route the LTC4054
+    # CHRG status pin to a GPIO, so we infer USB-plugged from battery
+    # voltage. An unloaded 1S LiPo sitting on a discharge curve does not
+    # cross 4.05 V; if we see VBAT above that under live load, USB is in
+    # and the charger is feeding both the rail and the cell. Hysteresis
+    # gap (4.05 enter / 3.95 exit) keeps the bit from chattering during
+    # CV-phase ripple.
+    VBUS_PRESENT_ENTER_V = 4.05
+    VBUS_PRESENT_EXIT_V  = 3.95
+    # CV-phase steady reading: anything at-or-above 4.18 V for several
+    # samples means the charger is in trickle / done. We surface this as
+    # "battery full" so the LED can switch from charging-pulse to solid.
+    BATTERY_FULL_V = 4.18
+
     def __init__(self):
         self.bat_adc = ADC(Pin(pinmap.ADC_BAT))
         self.bat_adc.atten(ADC.ATTN_11DB)
@@ -45,6 +59,14 @@ class PowerManager:
 
         # Probe for read_uv() once at init -- avoids per-call exception cost.
         self._has_read_uv = hasattr(self.bat_adc, "read_uv")
+
+        # Hysteretic VBUS-present flag. Initialized by sampling once at
+        # construction so we report the right state on the very first
+        # call to is_vbus_present() instead of having to wait for the
+        # power-mode loop to update it.
+        v0 = self.battery_voltage()
+        self._vbus_present = v0 >= self.VBUS_PRESENT_ENTER_V
+        self._full_streak = 0
 
     def battery_raw(self):
         """Average of AVG_SAMPLES raw samples to reduce ADC noise (~12 bits LSB)."""
@@ -80,6 +102,40 @@ class PowerManager:
         if v >= self.LIPO_FULL:
             return 100
         return int((v - self.LIPO_EMPTY) / (self.LIPO_FULL - self.LIPO_EMPTY) * 100)
+
+    def update_vbus_state(self):
+        """Re-evaluate the VBUS-present + battery-full flags from a fresh
+        battery reading. Hysteretic so the bit does not chatter at the
+        threshold. Call from a periodic power-mode loop (1 Hz is fine).
+        Returns the current (vbus_present, battery_full) tuple."""
+        v = self.battery_voltage()
+        if self._vbus_present:
+            # Sticky: only drop to False when we cross the lower threshold
+            if v < self.VBUS_PRESENT_EXIT_V:
+                self._vbus_present = False
+                self._full_streak = 0
+        else:
+            if v >= self.VBUS_PRESENT_ENTER_V:
+                self._vbus_present = True
+
+        # battery_full requires VBUS present AND several consecutive
+        # samples at/above the CV-trickle threshold. Without the streak
+        # gate, a single voltage spike on the rail (e.g. a USB hub
+        # negotiating) would flip the LED to solid-cyan briefly.
+        if self._vbus_present and v >= self.BATTERY_FULL_V:
+            self._full_streak += 1
+        else:
+            self._full_streak = 0
+        return self._vbus_present, self.is_battery_full()
+
+    def is_vbus_present(self):
+        """Latest VBUS-present bit. Set by update_vbus_state(); cheap to read."""
+        return self._vbus_present
+
+    def is_battery_full(self):
+        """True once the streak counter says we have been at/above the
+        CV-trickle threshold for at least 5 consecutive update ticks."""
+        return self._full_streak >= 5
 
     def power_off(self):
         """Toggle the MAX16054 to drop the main rail. Goodbye, world."""

@@ -67,6 +67,12 @@ class SettingsManager:
         # vs same session, flushing cached subscription state.
         "boot_seq":          0,
 
+        # Role tag (board #0220). Pushed from the phone via the
+        # set_role cmd verb. Drives the idle-LED hue (BLUE left,
+        # RED right, GREEN labeler, WHITE unassigned). Persistent so
+        # the device remembers which side it's worn on across reboots.
+        "role":              "",
+
         # Sensor scan
         "scan_interval_ms":  20,               # ~50 Hz default; can be tuned via cmd
         "status_interval_s": 5,                # how often power/wifi/heap status refreshes

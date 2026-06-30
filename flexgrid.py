@@ -28,7 +28,9 @@ import gc
 import machine
 import time
 import uos
+from machine import Pin
 import logger
+import pinmap
 
 from settings_manager import SettingsManager
 from sensor_matrix    import SensorMatrix
@@ -164,6 +166,28 @@ class _DeviceState:
         # None when no IMU is present. Set by main() after imu.init() lands.
         self.imu_scale        = None
 
+        # Power-mode state machine (board #0220). Three user-visible modes
+        # cycled by the SELECT button:
+        #   "stream"  -- default; Wi-Fi on, sensor scan on, sub-driven UDP
+        #   "standby" -- Wi-Fi on, scan on, UDP send paused; heartbeat ack
+        #                still keeps the hub's subscription alive
+        #   "charge"  -- USB plugged, low power: send paused, sensor/imu
+        #                paused; Wi-Fi may be disabled in a follow-up
+        # Defaults to "stream" at boot; the auto-enter rule promotes to
+        # "charge" after vbus_present + 30s idle (see power_mode_loop).
+        self.power_mode       = "stream"
+        # Role tag: "left" / "right" / "labeler" / "" (unassigned). Drives
+        # the idle-LED hue and lets the device know which side it is on.
+        # Pushed from the phone via the new set_role cmd verb; persisted.
+        self.role             = settings.get("role", "") or ""
+        # Recent-fault flag: set true at boot when reset_cause indicates
+        # WDT (or panic), cleared by power_mode_loop after 60 s. Drives
+        # the fast-red blink so the user sees the device just recovered.
+        self.in_fault         = False
+        # Idle-seconds counter incremented by power_mode_loop when in
+        # STREAM with no subscribers; gates auto-enter to CHARGE.
+        self.idle_seconds     = 0
+
     def set_scan_interval(self, ms):
         self.scan_interval_ms = int(ms)
         logger.info("scan_interval_ms set to {}".format(self.scan_interval_ms))
@@ -179,6 +203,33 @@ class _DeviceState:
     def request_reboot(self):
         self.reboot_requested = True
         logger.info("Reboot requested")
+
+    def set_role(self, role):
+        """Hub-pushed role assignment. Stored in settings (caller
+        persists). Valid values: 'left' / 'right' / 'labeler' / ''
+        (clear). Unknown roles are clamped to '' so a buggy hub cannot
+        wedge the device into an undefined LED state."""
+        if role not in ("left", "right", "labeler", ""):
+            role = ""
+        self.role = role
+        logger.info("Role set to '{}'".format(role))
+
+    def cycle_power_mode(self, vbus_present):
+        """SELECT-button action. Cycle through the 3-mode wheel:
+            STREAM -> STANDBY -> (CHARGE if USB) -> STREAM
+        With no USB the CHARGE leg is skipped so the wheel becomes a
+        simple 2-state toggle. Matches Tory's locked UX (board #0220)."""
+        if self.power_mode == "stream":
+            self.power_mode = "standby"
+        elif self.power_mode == "standby":
+            self.power_mode = "charge" if vbus_present else "stream"
+        else:  # "charge" or anything unexpected
+            self.power_mode = "stream"
+        # Streaming flag reflects whether UDP send should fire:
+        # only true in STREAM. STANDBY + CHARGE pause it.
+        self.streaming = (self.power_mode == "stream")
+        self.idle_seconds = 0
+        logger.info("power_mode -> {} (vbus={})".format(self.power_mode, vbus_present))
 
 
 # ---------------------------------------------------------------------------
@@ -429,40 +480,155 @@ async def subscriber_prune_loop(subscribers, interval_s=1):
         await asyncio.sleep(interval_s)
 
 
-async def status_led_loop(state, status_led, network, interval_ms=33):
+async def status_led_loop(state, status_led, network, power, interval_ms=33):
     """Drive the RGB LED state palette based on live device state. Runs at
     ~30 Hz so breathe / blink animations look smooth.
 
-    State machine (highest priority wins):
-       error          -> any error flag in device_status (TODO: wire this up)
-       wifi_lost      -> Wi-Fi disconnected
-       boot           -> Wi-Fi present but no subscribers yet (initial state)
-       recording      -> SD recording active
-       predicting     -> reserved for future hub-side prediction echo
-       streaming      -> at least one subscriber currently receiving
-       idle           -> Wi-Fi up, no subscribers (settled into the idle state)
+    Resolution priority (highest wins, locked palette per board #0220):
+
+        fault              -> in_fault set (recent WDT) -- RED fast blink
+        sleep              -> in_sleep set (gyro stillness in STREAM) -- WHITE dim breath
+        ap_provisioning    -> only reachable on the AP-mode boot branch
+        STANDBY            -> purple slow breath
+        CHARGE + full      -> solid cyan
+        CHARGE + charging  -> cyan slow pulse
+        STREAM + subs + USB-> orange solid + brief cyan flash every 5s
+        STREAM + subs      -> solid orange
+        STREAM + idle      -> role-color brief pulse every 3s
+                              (BLUE left, RED right, GREEN labeler, WHITE unassigned)
+
+    Wi-Fi-down is intentionally not surfaced -- the device degrading
+    Wi-Fi only matters while a hub is trying to use it, and Tory wants
+    the role-pulse to remain dominant when the device is sitting idle
+    on a desk. If the operator needs Wi-Fi diagnosis they read get_info
+    or watch the OLED, both of which are clearer than a blinking LED.
     """
-    has_been_subscribed = False
     while True:
         try:
             now_ms = time.ticks_ms()
-            if not network.is_connected():
-                status_led.set_state("wifi_lost")
-            elif state.subscribers.count() > 0:
-                status_led.set_state("streaming")
-                has_been_subscribed = True
-            elif has_been_subscribed:
-                # We have served at least one hub; settle into idle.
-                status_led.set_state("idle")
-            else:
-                # Booted, Wi-Fi up, never subscribed yet.
-                status_led.set_state("boot")
+            named = _resolve_led_state(state, power)
+            status_led.set_state(named)
             status_led.animate(now_ms)
         except (asyncio.CancelledError, SystemExit):
             raise
         except BaseException as e:
             logger.warn("status_led_loop failed: {} ({})".format(type(e).__name__, e))
         await asyncio.sleep_ms(interval_ms)
+
+
+def _resolve_led_state(state, power):
+    """Pure helper: map the current (power_mode, role, has_subs, vbus,
+    fault, sleep) tuple to one palette name. Kept side-effect-free so
+    the resolver logic is easy to unit-test off-device by feeding it a
+    fake state object."""
+    if getattr(state, "in_fault", False):
+        return "fault"
+    if getattr(state, "in_sleep", False):
+        return "sleep"
+    mode = getattr(state, "power_mode", "stream")
+    if mode == "standby":
+        return "standby"
+    if mode == "charge":
+        return "charge_full" if power.is_battery_full() else "charging"
+    # STREAM. Treat a hub-paused state (subs > 0 but state.streaming
+    # is False because a hub called stop_stream) as idle, so the LED
+    # does not lie about whether data is flowing.
+    has_active_subs = state.subscribers.count() > 0 and state.streaming
+    vbus = power.is_vbus_present()
+    if has_active_subs:
+        return "streaming_on_usb" if vbus else "streaming"
+    # Idle: role-coded
+    role = getattr(state, "role", "") or ""
+    return {
+        "left":    "idle_left",
+        "right":   "idle_right",
+        "labeler": "idle_labeler",
+    }.get(role, "idle_unassigned")
+
+
+async def power_mode_loop(state, power, select_pin, settings,
+                          tick_ms=100,
+                          auto_charge_idle_s=30,
+                          fault_clear_s=60):
+    """Drive the STREAM/STANDBY/CHARGE state machine + SELECT button cycle.
+
+    Responsibilities (board #0220):
+      - Sample SELECT (active-LOW with pull-up) at tick_ms; debounce
+        on falling edge; on press, advance state.cycle_power_mode().
+      - Every 10 ticks (1 s) update power.update_vbus_state() so the
+        LED resolver sees fresh VBUS + battery-full bits.
+      - Auto-enter CHARGE: when power_mode==stream + USB present +
+        idle (no subscribers) for auto_charge_idle_s seconds.
+      - Auto-exit CHARGE: when USB unplugs while in CHARGE, drop
+        straight back to STREAM (the user's expected default).
+      - Clear in_fault after fault_clear_s of clean runtime so the
+        red-blink reverts to normal once the device has demonstrated
+        stability.
+
+    SELECT button: if pin_value==1 always (not soldered yet on current
+    V4 units) the polling no-ops gracefully; auto-enter still works.
+    Tory can solder SELECT later and behavior lights up.
+
+    Hardened with SystemExit/CancelledError re-raise + BaseException
+    catch matching the rest of the V4 loops (board #0166)."""
+    last_press_ms = 0
+    DEBOUNCE_MS = 200
+    tick_count = 0
+    fault_started_ms = time.ticks_ms() if state.in_fault else None
+    while True:
+        try:
+            now_ms = time.ticks_ms()
+            # 1) SELECT button (active-LOW). Falling-edge detection with
+            #    debounce. Read once per tick; cheap.
+            try:
+                pressed = select_pin.value() == 0
+            except Exception:
+                pressed = False
+            if pressed and time.ticks_diff(now_ms, last_press_ms) > DEBOUNCE_MS:
+                last_press_ms = now_ms
+                state.cycle_power_mode(power.is_vbus_present())
+
+            # 2) VBUS + battery-full update at 1 Hz.
+            tick_count += 1
+            if tick_count >= max(1, 1000 // tick_ms):
+                tick_count = 0
+                try:
+                    power.update_vbus_state()
+                except Exception as e:
+                    logger.warn("update_vbus_state failed: {}".format(e))
+
+                # 3) Track idle seconds for auto-CHARGE entry.
+                if state.power_mode == "stream" and state.subscribers.count() == 0:
+                    state.idle_seconds += 1
+                else:
+                    state.idle_seconds = 0
+
+                # 4) Auto-enter / auto-exit CHARGE.
+                if (state.power_mode == "stream"
+                        and power.is_vbus_present()
+                        and state.idle_seconds >= auto_charge_idle_s):
+                    state.power_mode = "charge"
+                    state.streaming = False
+                    state.idle_seconds = 0
+                    logger.info("Auto-entered CHARGE (USB + idle {}s)".format(
+                        auto_charge_idle_s))
+                elif (state.power_mode == "charge"
+                        and not power.is_vbus_present()):
+                    state.power_mode = "stream"
+                    state.streaming = True
+                    logger.info("USB unplugged; exited CHARGE -> STREAM")
+
+                # 5) Auto-clear in_fault after fault_clear_s of clean runtime.
+                if state.in_fault and fault_started_ms is not None:
+                    if time.ticks_diff(now_ms, fault_started_ms) > fault_clear_s * 1000:
+                        state.in_fault = False
+                        logger.info("in_fault cleared after {}s clean runtime".format(fault_clear_s))
+        except (asyncio.CancelledError, SystemExit):
+            raise
+        except BaseException as e:
+            logger.warn("power_mode_loop iter failed: {} ({})".format(
+                type(e).__name__, e))
+        await asyncio.sleep_ms(tick_ms)
 
 
 async def gc_loop(interval_s=2):
@@ -608,6 +774,32 @@ async def main():
     # it up without each having to ask the imu instance. Stays None on
     # boards where the IMU isn't present, which keeps the field optional.
     state.imu_scale = imu.scale_dict() if imu.present else None
+    # If the previous run ended in a watchdog timeout, flag in_fault so
+    # the RGB LED resolver shows fast-red-blink for the first 60 s.
+    # power_mode_loop will auto-clear after fault_clear_s of clean runtime.
+    if rc is not None and _RESET_CAUSES.get(rc, "") == "WDT":
+        state.in_fault = True
+        logger.warn("in_fault set (previous run ended in WDT)")
+    # Per-key persist callback bound to the SettingsManager. The set_role
+    # cmd verb uses this to write the new role through to settings.json.
+    def _save_settings(key, value):
+        settings[key] = value
+        SettingsManager.save(settings)
+    state.save_settings = _save_settings
+    # SELECT-button input. Active-LOW with internal pull-up. On boards
+    # where the button is NOT yet soldered, pin_value() returns 1 always
+    # and power_mode_loop's polling no-ops gracefully (auto-CHARGE still
+    # works). Constructed once + handed to the loop.
+    try:
+        select_pin = Pin(pinmap.BTN_SELECT, Pin.IN, Pin.PULL_UP)
+    except Exception as e:
+        logger.warn("SELECT button init failed (continuing without it): {}".format(e))
+        # Fallback dummy: a stub whose value() always returns 1 keeps the
+        # loop alive without special-casing the missing-pin path.
+        class _NoPin:
+            def value(self):
+                return 1
+        select_pin = _NoPin()
 
     display.text_screen([
         "OpenMuscle",
@@ -667,7 +859,12 @@ async def main():
     # full beacon interval" case. See PROTOCOL.md section 5.5.
     asyncio.create_task(discovery.discover_listener_loop())
     asyncio.create_task(subscriber_prune_loop(subscribers))
-    asyncio.create_task(status_led_loop(state, status_led, network))
+    asyncio.create_task(status_led_loop(state, status_led, network, power))
+    # Power-mode state machine + SELECT-button cycle (board #0220).
+    # Drives STREAM/STANDBY/CHARGE transitions, auto-CHARGE on USB+idle,
+    # and refreshes VBUS-present + battery-full bits the LED resolver
+    # reads. Cheap (100 ms tick, ~1 % CPU).
+    asyncio.create_task(power_mode_loop(state, power, select_pin, settings))
     asyncio.create_task(gc_loop())
     asyncio.create_task(reboot_watcher(state))
     # Diagnostic for the V4 WDT-reset mystery (#0156). Logs gap-since-feed +

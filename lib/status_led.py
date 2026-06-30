@@ -19,18 +19,44 @@ from machine import Pin, PWM
 import pinmap
 
 
-# 8-bit color tuples (0-255 per channel) for each named state.
-# The exact palette is firmware-controlled, not user-facing; tune to taste.
+# 8-bit color tuples (0-255 per channel) per named state.
+#
+# Palette discipline (board #0220 alignment with Tory's locked palette,
+# 2026-06-30): no two distinct modes share an identical hue+pattern.
+# Pattern carries the disambiguator where hues are reused:
+#   CYAN pulse  vs CYAN solid  = charging vs full
+#   RED pulse   vs RED blink   = right-role idle vs fault
+# The idle hue ENCODES THE ROLE (blue=left, red=right, green=labeler,
+# white=unassigned); active modes use mode-coded hues (orange=streaming,
+# cyan=USB, purple=standby, magenta=provisioning, white-dim=sleep).
+# The state names below are stable; flexgrid.py picks the right one
+# from the current (power_mode, has_subscribers, vbus, role, fault,
+# sleep) tuple every animator tick.
 PALETTE_DEFAULT = {
-    "boot":         (0,   0,   255, "breathe"),    # blue slow breathe while booting / Wi-Fi connecting
-    "idle":         (32,  32,  32,  "solid"),      # dim white at idle (no peer subscribed)
-    "streaming":    (0,   200, 0,   "solid"),      # green solid while at least one hub is subscribed and receiving
-    "recording":    (200, 200, 0,   "breathe"),    # yellow breathe during a session recording
-    "predicting":   (180, 0,   200, "solid"),      # purple solid when pushing predictions to an actuator
-    "sleeping":     (0,   0,   0,   "solid"),      # off
-    "wifi_lost":    (200, 80,  0,   "blink_fast"), # orange fast blink when Wi-Fi dropped
-    "error":        (255, 0,   0,   "blink_fast"), # red fast blink on sensor/IMU/SD fault
-    "calibrating":  (0,   200, 200, "breathe"),    # cyan breathe in calibration menu
+    # --- Boot / system overlays ---
+    "boot":             (0,   0,   200, "breathe"),     # blue slow breathe while booting / Wi-Fi connecting
+    "fault":            (255, 0,   0,   "blink_fast"),  # red fast blink, e.g. recent WDT-reset
+    "ap_provisioning":  (200, 0,   200, "blink_slow"),  # magenta 1 Hz blink during AP-mode provisioning
+    "sleep":            (40,  40,  40,  "breathe_slow"), # very-dim white slow breathe (gyro stillness)
+    # --- STREAM mode, idle (no subscribers): hue encodes role ---
+    "idle_left":        (0,   0,   200, "pulse_3s"),    # brief blue pulse every 3s
+    "idle_right":       (200, 0,   0,   "pulse_3s"),    # brief red pulse every 3s
+    "idle_labeler":     (0,   200, 0,   "pulse_3s"),    # brief green pulse every 3s
+    "idle_unassigned":  (100, 100, 100, "pulse_3s"),    # brief white pulse every 3s ("tag me")
+    # --- STREAM mode, has subscribers ---
+    "streaming":        (200, 80,  0,   "solid"),       # soft solid orange
+    "streaming_on_usb": (200, 80,  0,   "stream_usb"),  # orange solid + brief cyan flash every 5s
+    # --- STANDBY ---
+    "standby":          (120, 0,   180, "breathe_slow"), # slow purple breath, 3 s period
+    # --- CHARGE mode ---
+    "charging":         (0,   140, 200, "pulse_1500"),  # slow cyan pulse, 1.5 s period
+    "charge_full":      (0,   140, 200, "solid"),       # solid cyan = battery full
+    # --- Legacy palette entries kept so existing callers do not break.
+    # Slowly migrate them to the new names above and then drop these.
+    "idle":             (32,  32,  32,  "solid"),
+    "wifi_lost":        (200, 80,  0,   "blink_fast"),
+    "error":            (255, 0,   0,   "blink_fast"),
+    "calibrating":      (0,   200, 200, "breathe"),
 }
 
 
@@ -97,6 +123,15 @@ class StatusLed:
             k = phase
             self._set_rgb(int(r0 * k), int(g0 * k), int(b0 * k))
             return
+        if mode == "breathe_slow":
+            # 0.33 Hz triangle wave: 0 -> 1 -> 0 over 3000 ms. Used for
+            # standby (purple) and sleep (very-dim white).
+            phase = (t_ms % 3000) / 1500.0
+            if phase > 1.0:
+                phase = 2.0 - phase
+            k = phase
+            self._set_rgb(int(r0 * k), int(g0 * k), int(b0 * k))
+            return
         if mode == "blink_fast":
             # ~3 Hz square wave, ~165 ms on / ~165 ms off.
             on = (t_ms // 165) % 2 == 0
@@ -111,4 +146,45 @@ class StatusLed:
                 self._set_rgb(r0, g0, b0)
             else:
                 self._set_rgb(0, 0, 0)
+            return
+        if mode == "pulse_3s":
+            # Brief 200 ms peak at the start of every 3000 ms window;
+            # dark for the remaining 2800 ms. Used for the role-color
+            # idle indicator (BLUE/RED/GREEN/WHITE) so an unattended
+            # device sips power and still flags its role at a glance.
+            in_window = t_ms % 3000
+            if in_window < 200:
+                # Quick rise-fall over the 200 ms pulse for a softer look.
+                k = in_window / 100.0
+                if k > 1.0:
+                    k = 2.0 - k
+                self._set_rgb(int(r0 * k), int(g0 * k), int(b0 * k))
+            else:
+                self._set_rgb(0, 0, 0)
+            return
+        if mode == "pulse_1500":
+            # 1.5 s period triangle pulse for CHARGE-mode "charging".
+            # Always visible (not zero-floor) so the user sees the
+            # device is actively charging even at a glance.
+            phase = (t_ms % 1500) / 750.0
+            if phase > 1.0:
+                phase = 2.0 - phase
+            k = 0.2 + 0.8 * phase   # 20%-100% range, never fully off
+            self._set_rgb(int(r0 * k), int(g0 * k), int(b0 * k))
+            return
+        if mode == "stream_usb":
+            # The "STREAM mode + USB plugged + has subscribers" composite:
+            # solid orange base with a brief cyan flash every 5000 ms.
+            # The flash is short (150 ms) so the streaming-orange identity
+            # is dominant; the cyan blip says "you are streaming on USB
+            # (charging slowly) -- press SELECT to switch to CHARGE".
+            t_in = t_ms % 5000
+            if t_in < 150:
+                k = t_in / 75.0
+                if k > 1.0:
+                    k = 2.0 - k
+                # Cyan overlay color
+                self._set_rgb(int(0 * k), int(140 * k), int(200 * k))
+            else:
+                self._set_rgb(r0, g0, b0)
             return
