@@ -547,9 +547,11 @@ def _resolve_led_state(state, power):
 
 
 async def power_mode_loop(state, power, select_pin, settings,
+                          boot_pin=None,
                           tick_ms=100,
                           auto_charge_idle_s=30,
-                          fault_clear_s=60):
+                          fault_clear_s=60,
+                          reprovision_hold_s=5):
     """Drive the STREAM/STANDBY/CHARGE state machine + SELECT button cycle.
 
     Responsibilities (board #0220):
@@ -569,11 +571,22 @@ async def power_mode_loop(state, power, select_pin, settings,
     V4 units) the polling no-ops gracefully; auto-enter still works.
     Tory can solder SELECT later and behavior lights up.
 
+    BOOT button (GPIO0, populated on all V4 units): held for
+    reprovision_hold_s seconds during runtime -> wipe Wi-Fi creds ->
+    reboot into AP provisioning mode (Layer 2, PROVISIONING.md +
+    board #0312 P0.4). This is the no-USB recovery path at a foreign
+    venue where the band cannot join its stored SSID and therefore
+    cannot be reached over the network. A short BOOT tap does nothing
+    at runtime (the strap only matters at reset), so accidental
+    presses are harmless; only a deliberate 5-second hold wipes.
+
     Hardened with SystemExit/CancelledError re-raise + BaseException
     catch matching the rest of the V4 loops (board #0166)."""
     last_press_ms = 0
     DEBOUNCE_MS = 200
     tick_count = 0
+    boot_held_ticks = 0
+    reprovision_hold_ticks = max(1, (reprovision_hold_s * 1000) // tick_ms)
     fault_started_ms = time.ticks_ms() if state.in_fault else None
     while True:
         try:
@@ -587,6 +600,32 @@ async def power_mode_loop(state, power, select_pin, settings,
             if pressed and time.ticks_diff(now_ms, last_press_ms) > DEBOUNCE_MS:
                 last_press_ms = now_ms
                 state.cycle_power_mode(power.is_vbus_present())
+
+            # 1b) BOOT held -> Layer 2 reprovision wipe. Counts consecutive
+            #     held ticks so a bounce or brief tap never accumulates.
+            try:
+                boot_down = boot_pin.value() == 0
+            except Exception:
+                boot_down = False
+            if boot_down:
+                boot_held_ticks += 1
+                if boot_held_ticks == reprovision_hold_ticks:
+                    logger.warn("BOOT held {}s: wiping Wi-Fi creds; rebooting to AP provisioning".format(
+                        reprovision_hold_s))
+                    try:
+                        settings["wifi_ssid"] = ""
+                        settings["wifi_password"] = ""
+                        SettingsManager.save(settings)
+                    except Exception as e:
+                        logger.error("Cred wipe failed; NOT rebooting: {}".format(e))
+                        boot_held_ticks = 0
+                        continue
+                    # Brief red flash so the user knows the hold registered,
+                    # then reset. The AP branch shows magenta after boot.
+                    await asyncio.sleep_ms(300)
+                    machine.reset()
+            else:
+                boot_held_ticks = 0
 
             # 2) VBUS + battery-full update at 1 Hz.
             tick_count += 1
@@ -800,6 +839,17 @@ async def main():
             def value(self):
                 return 1
         select_pin = _NoPin()
+    # BOOT button (GPIO0, strap pin, populated on every V4). Runtime
+    # read is safe; the strap only matters at reset. Held 5 s -> Layer 2
+    # reprovision wipe (power_mode_loop). Same graceful fallback.
+    try:
+        boot_pin = Pin(pinmap.BTN_BOOT, Pin.IN, Pin.PULL_UP)
+    except Exception as e:
+        logger.warn("BOOT button init failed (reprovision chord disabled): {}".format(e))
+        class _NoPin2:
+            def value(self):
+                return 1
+        boot_pin = _NoPin2()
 
     display.text_screen([
         "OpenMuscle",
@@ -864,7 +914,8 @@ async def main():
     # Drives STREAM/STANDBY/CHARGE transitions, auto-CHARGE on USB+idle,
     # and refreshes VBUS-present + battery-full bits the LED resolver
     # reads. Cheap (100 ms tick, ~1 % CPU).
-    asyncio.create_task(power_mode_loop(state, power, select_pin, settings))
+    asyncio.create_task(power_mode_loop(state, power, select_pin, settings,
+                                        boot_pin=boot_pin))
     asyncio.create_task(gc_loop())
     asyncio.create_task(reboot_watcher(state))
     # Diagnostic for the V4 WDT-reset mystery (#0156). Logs gap-since-feed +
