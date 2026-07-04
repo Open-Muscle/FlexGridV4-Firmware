@@ -65,11 +65,14 @@ BTN_MENU   = 21
 # ---------------------------------------------------------------------------
 PWR_OFF  = 45      # drive HIGH momentarily to tell MAX16054 to drop power
 ADC_BAT  = 18      # battery voltage divider
-# VBUS presence detect (discovered in the V4 netlist 2026-07-02): USB VBUS
-# through a 10k series (R19) with 100k pulldown (R20) into module pad 32 =
-# GPIO39. Reads 1 when USB power is present, 0 when on battery. Replaces
-# the VBAT-threshold heuristic for charge-mode entry/exit.
-VBUS_STAT = 39
+# VBUS presence detect - V4.2 SCHEMATIC ONLY, NOT WIRED ON AS-BUILT V4
+# BOARDS (Tory 2026-07-02: R19/R20 divider into GPIO39 was added to the
+# schematic after fab, alongside the ESD fix). On the physical V4 bands
+# GPIO39 floats, so firmware must NOT read it unless the per-device
+# settings.json opts in with "vbus_stat_pin": 39 (set that on V4.2+
+# hardware only). Default behavior everywhere else: VBAT-threshold
+# heuristic in power_manager.
+VBUS_STAT = 39   # V4.2+; informational, gated by settings["vbus_stat_pin"]
 
 # ---------------------------------------------------------------------------
 # Haptic motor (NEW: driver populated on V4 but defaults OFF)

@@ -73,6 +73,12 @@ class SettingsManager:
         # the device remembers which side it's worn on across reboots.
         "role":              "",
 
+        # Hardware VBUS-detect GPIO. None on as-built V4 (the R19/R20
+        # divider exists only in the V4.2 schematic; GPIO39 floats on
+        # these boards). Set to 39 on V4.2+ hardware. None = firmware
+        # infers USB presence from the VBAT threshold.
+        "vbus_stat_pin":     None,
+
         # Sensor scan
         "scan_interval_ms":  20,               # ~50 Hz default; can be tuned via cmd
         "status_interval_s": 5,                # how often power/wifi/heap status refreshes

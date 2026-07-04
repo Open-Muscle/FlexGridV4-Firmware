@@ -862,7 +862,9 @@ async def main():
     subscribers   = Subscribers(
                         max_subscribers=settings.get("max_subscribers", 4),
                         heartbeat_timeout_s=settings.get("heartbeat_timeout_s", 5))
-    power         = PowerManager()
+    # vbus_stat_pin: None on as-built V4 (GPIO39 unwired, floats);
+    # set to 39 in settings.json on V4.2+ hardware only.
+    power         = PowerManager(vbus_pin=settings.get("vbus_stat_pin"))
     display       = DisplayManager()
     sensor_matrix = SensorMatrix()
     network       = NetworkManager(settings, subscribers)

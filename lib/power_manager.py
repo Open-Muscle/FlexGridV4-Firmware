@@ -45,7 +45,12 @@ class PowerManager:
     # "battery full" so the LED can switch from charging-pulse to solid.
     BATTERY_FULL_V = 4.18
 
-    def __init__(self):
+    def __init__(self, vbus_pin=None):
+        """vbus_pin: GPIO number of a REAL hardware VBUS divider, or None.
+        None (default) = VBAT-threshold heuristic. Only pass a pin on
+        boards that physically wire it (V4.2+ via settings.json
+        "vbus_stat_pin"); on as-built V4 the GPIO floats and reading
+        it would randomly toggle charge mode."""
         self.bat_adc = ADC(Pin(pinmap.ADC_BAT))
         self.bat_adc.atten(ADC.ATTN_11DB)
         # WIDTH_12BIT is the only width ESP32-S3 MicroPython actually
@@ -60,17 +65,18 @@ class PowerManager:
         # Probe for read_uv() once at init -- avoids per-call exception cost.
         self._has_read_uv = hasattr(self.bat_adc, "read_uv")
 
-        # VBUS presence. Preferred source: the GPIO39 divider (R19/R20
-        # off USB VBUS, found in the V4 netlist 2026-07-02) - a real
-        # digital signal with clean edges. Fallback when the pin init
-        # fails (or on hardware without the divider): the hysteretic
-        # VBAT-threshold heuristic below, which is known to miss the
-        # unplug edge on a nearly-full battery.
+        # VBUS presence. When the board wires a real divider (V4.2+,
+        # settings "vbus_stat_pin") use the digital signal - exact,
+        # edge-clean. Otherwise (as-built V4: GPIO floats) use the
+        # hysteretic VBAT-threshold heuristic, which is known to miss
+        # the unplug edge on a nearly-full battery. PULL_DOWN so a
+        # misconfigured pin at least reads a stable 0 instead of noise.
         self._vbus_pin = None
-        try:
-            self._vbus_pin = Pin(pinmap.VBUS_STAT, Pin.IN)
-        except Exception:
-            pass
+        if vbus_pin is not None:
+            try:
+                self._vbus_pin = Pin(int(vbus_pin), Pin.IN, Pin.PULL_DOWN)
+            except Exception:
+                self._vbus_pin = None
         v0 = self.battery_voltage()
         self._vbus_present = (self._vbus_pin.value() == 1) if self._vbus_pin \
             else (v0 >= self.VBUS_PRESENT_ENTER_V)
