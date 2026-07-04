@@ -226,7 +226,10 @@ class Discovery:
                     except Exception as e:
                         logger.warn("mDNS re-register on reconnect failed: {}".format(e))
                 was_connected = now_connected
-                if not self.subscribers.has_any():
+                # Gate on link-up: in CHARGE mode the radio is off and a
+                # sendto would raise once per second, and those WRN lines
+                # flush to flash (the exact stall class fixed in 65ffa06).
+                if now_connected and not self.subscribers.has_any():
                     self._send_beacon()
             except (asyncio.CancelledError, SystemExit):
                 raise

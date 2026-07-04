@@ -22,10 +22,11 @@ import pinmap
 # 8-bit color tuples (0-255 per channel) per named state.
 #
 # Palette discipline (board #0220 alignment with Tory's locked palette,
-# 2026-06-30): no two distinct modes share an identical hue+pattern.
-# Pattern carries the disambiguator where hues are reused:
-#   CYAN pulse  vs CYAN solid  = charging vs full
-#   RED pulse   vs RED blink   = right-role idle vs fault
+# 2026-06-30; CHARGE recolored purple per Tory 2026-07-02): no two
+# distinct modes share an identical hue+pattern. Pattern carries the
+# disambiguator where hues are reused:
+#   PURPLE pulse vs PURPLE solid = charging vs full
+#   RED pulse    vs RED blink    = right-role idle vs fault
 # The idle hue ENCODES THE ROLE (blue=left, red=right, green=labeler,
 # white=unassigned); active modes use mode-coded hues (orange=streaming,
 # cyan=USB, purple=standby, magenta=provisioning, white-dim=sleep).
@@ -47,10 +48,10 @@ PALETTE_DEFAULT = {
     "streaming":        (200, 80,  0,   "solid"),       # soft solid orange
     "streaming_on_usb": (200, 80,  0,   "stream_usb"),  # orange solid + brief cyan flash every 5s
     # --- STANDBY ---
-    "standby":          (120, 0,   180, "breathe_slow"), # slow purple breath, 3 s period
-    # --- CHARGE mode ---
-    "charging":         (0,   140, 200, "pulse_1500"),  # slow cyan pulse, 1.5 s period
-    "charge_full":      (0,   140, 200, "solid"),       # solid cyan = battery full
+    "standby":          (0,   140, 200, "breathe_slow"), # slow cyan breath, 3 s period
+    # --- CHARGE mode (PURPLE per Tory 2026-07-02: "band turn purple") ---
+    "charging":         (120, 0,   180, "pulse_1500"),  # slow purple pulse, 1.5 s period
+    "charge_full":      (120, 0,   180, "solid"),       # solid purple = battery full
     # --- Legacy palette entries kept so existing callers do not break.
     # Slowly migrate them to the new names above and then drop these.
     "idle":             (32,  32,  32,  "solid"),

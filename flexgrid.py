@@ -548,10 +548,13 @@ def _resolve_led_state(state, power):
 
 async def power_mode_loop(state, power, select_pin, settings,
                           boot_pin=None,
+                          menu_pin=None,
+                          network=None,
                           tick_ms=100,
                           auto_charge_idle_s=30,
                           fault_clear_s=60,
-                          reprovision_hold_s=5):
+                          reprovision_hold_s=5,
+                          charge_hold_s=2):
     """Drive the STREAM/STANDBY/CHARGE state machine + SELECT button cycle.
 
     Responsibilities (board #0220):
@@ -580,13 +583,61 @@ async def power_mode_loop(state, power, select_pin, settings,
     at runtime (the strap only matters at reset), so accidental
     presses are harmless; only a deliberate 5-second hold wipes.
 
+    MENU button (GPIO21): held for charge_hold_s seconds -> toggle
+    CHARGE mode (Tory 2026-07-02). Entering CHARGE turns the Wi-Fi
+    RADIO OFF and drops the CPU to 80 MHz so nearly all of the
+    LTC4054's ~150 mA charge current reaches the battery instead of
+    feeding the radio (the reason the green CHRG LED never went out).
+    Holding MENU again exits back to STREAM: CPU to 240 MHz, radio
+    on, reconnect spawned. LED: purple pulse while charging, solid
+    purple at full.
+
     Hardened with SystemExit/CancelledError re-raise + BaseException
     catch matching the rest of the V4 loops (board #0166)."""
+
+    def _enter_charge(reason):
+        state.power_mode = "charge"
+        state.streaming = False
+        state.idle_seconds = 0
+        try:
+            machine.freq(80_000_000)
+        except Exception as e:
+            logger.warn("freq(80MHz) failed: {}".format(e))
+        if network is not None:
+            try:
+                network.sta.active(False)
+            except Exception as e:
+                logger.warn("Wi-Fi off failed: {}".format(e))
+        logger.info("CHARGE entered ({}): Wi-Fi off, CPU 80MHz".format(reason))
+
+    def _exit_charge(reason):
+        try:
+            machine.freq(240_000_000)
+        except Exception as e:
+            logger.warn("freq(240MHz) failed: {}".format(e))
+        if network is not None:
+            try:
+                network.sta.active(True)
+                # Reconnect in the background; announce_loop's rising-edge
+                # detection re-registers mDNS once the join lands, and the
+                # hub re-subscribes off the resumed beacon.
+                asyncio.create_task(network.connect())
+            except Exception as e:
+                logger.warn("Wi-Fi resume failed: {}".format(e))
+        state.power_mode = "stream"
+        state.streaming = True
+        state.idle_seconds = 0
+        logger.info("CHARGE exited ({}): Wi-Fi resuming, CPU 240MHz".format(reason))
+
     last_press_ms = 0
     DEBOUNCE_MS = 200
     tick_count = 0
     boot_held_ticks = 0
+    menu_held_ticks = 0
+    menu_latched = False
     reprovision_hold_ticks = max(1, (reprovision_hold_s * 1000) // tick_ms)
+    charge_hold_ticks = max(1, (charge_hold_s * 1000) // tick_ms)
+    prev_vbus = power.is_vbus_present()
     fault_started_ms = time.ticks_ms() if state.in_fault else None
     while True:
         try:
@@ -600,6 +651,25 @@ async def power_mode_loop(state, power, select_pin, settings,
             if pressed and time.ticks_diff(now_ms, last_press_ms) > DEBOUNCE_MS:
                 last_press_ms = now_ms
                 state.cycle_power_mode(power.is_vbus_present())
+
+            # 1a) MENU held charge_hold_s -> toggle CHARGE mode. Latched so
+            #     one continuous hold toggles exactly once (the user must
+            #     release before the next toggle registers).
+            try:
+                menu_down = menu_pin.value() == 0
+            except Exception:
+                menu_down = False
+            if menu_down:
+                menu_held_ticks += 1
+                if menu_held_ticks >= charge_hold_ticks and not menu_latched:
+                    menu_latched = True
+                    if state.power_mode == "charge":
+                        _exit_charge("MENU hold")
+                    else:
+                        _enter_charge("MENU hold")
+            else:
+                menu_held_ticks = 0
+                menu_latched = False
 
             # 1b) BOOT held -> Layer 2 reprovision wipe. Counts consecutive
             #     held ticks so a bounce or brief tap never accumulates.
@@ -642,20 +712,20 @@ async def power_mode_loop(state, power, select_pin, settings,
                 else:
                     state.idle_seconds = 0
 
-                # 4) Auto-enter / auto-exit CHARGE.
+                # 4) Auto-enter / auto-exit CHARGE. Exit is EDGE-based
+                #    (vbus present -> absent) rather than level-based so a
+                #    manual MENU-hold entry without USB (e.g. a power bank
+                #    the VBAT heuristic cannot see) is not immediately
+                #    fought by the auto-exit.
+                vbus_now = power.is_vbus_present()
                 if (state.power_mode == "stream"
-                        and power.is_vbus_present()
+                        and vbus_now
                         and state.idle_seconds >= auto_charge_idle_s):
-                    state.power_mode = "charge"
-                    state.streaming = False
-                    state.idle_seconds = 0
-                    logger.info("Auto-entered CHARGE (USB + idle {}s)".format(
-                        auto_charge_idle_s))
+                    _enter_charge("USB + idle {}s".format(auto_charge_idle_s))
                 elif (state.power_mode == "charge"
-                        and not power.is_vbus_present()):
-                    state.power_mode = "stream"
-                    state.streaming = True
-                    logger.info("USB unplugged; exited CHARGE -> STREAM")
+                        and prev_vbus and not vbus_now):
+                    _exit_charge("USB unplugged")
+                prev_vbus = vbus_now
 
                 # 5) Auto-clear in_fault after fault_clear_s of clean runtime.
                 if state.in_fault and fault_started_ms is not None:
@@ -850,6 +920,17 @@ async def main():
             def value(self):
                 return 1
         boot_pin = _NoPin2()
+    # MENU button (GPIO21). Held 2 s -> toggle CHARGE mode (Wi-Fi off,
+    # purple LED; Tory 2026-07-02). Inert until the button is soldered;
+    # same graceful fallback as SELECT/BOOT.
+    try:
+        menu_pin = Pin(pinmap.BTN_MENU, Pin.IN, Pin.PULL_UP)
+    except Exception as e:
+        logger.warn("MENU button init failed (charge chord disabled): {}".format(e))
+        class _NoPin3:
+            def value(self):
+                return 1
+        menu_pin = _NoPin3()
 
     display.text_screen([
         "OpenMuscle",
@@ -915,7 +996,9 @@ async def main():
     # and refreshes VBUS-present + battery-full bits the LED resolver
     # reads. Cheap (100 ms tick, ~1 % CPU).
     asyncio.create_task(power_mode_loop(state, power, select_pin, settings,
-                                        boot_pin=boot_pin))
+                                        boot_pin=boot_pin,
+                                        menu_pin=menu_pin,
+                                        network=network))
     asyncio.create_task(gc_loop())
     asyncio.create_task(reboot_watcher(state))
     # Diagnostic for the V4 WDT-reset mystery (#0156). Logs gap-since-feed +
