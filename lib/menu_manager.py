@@ -1,6 +1,7 @@
 # lib/menu_manager.py
-# 3-button menu for V4 (BOOT, MENU, SELECT; RESET is hardwired reset).
-# BOOT is also the GPIO0 strap pin, usable as a normal input after boot.
+# 2-button OLED menu for V4: MENU cycles menus, SELECT cycles items.
+# The silkscreen "BOOT" button is wired to EN (hardware reset), NOT a
+# GPIO, so it carries no menu action (schematic-verified 2026-07-02).
 
 from machine import Pin
 import time
@@ -14,7 +15,6 @@ class MenuManager:
         self.power = power
         self.select_btn = Pin(pinmap.BTN_SELECT, Pin.IN, Pin.PULL_UP)
         self.menu_btn   = Pin(pinmap.BTN_MENU,   Pin.IN, Pin.PULL_UP)
-        self.boot_btn   = Pin(pinmap.BTN_BOOT,   Pin.IN, Pin.PULL_UP)
         self.debounce = debounce_ms
 
         self.menus = [
@@ -42,14 +42,6 @@ class MenuManager:
             self.current_selection = (
                 self.current_selection + 1
             ) % len(self.menus[self.current_menu])
-
-        # BOOT long-press → power off (only when in the 'About' menu)
-        if self.boot_btn.value() == 0 and self.current_menu == 2:
-            t0 = time.ticks_ms()
-            while self.boot_btn.value() == 0:
-                if time.ticks_diff(time.ticks_ms(), t0) > 1500:
-                    self.power.power_off()
-                    return
 
     def get_state(self):
         return {

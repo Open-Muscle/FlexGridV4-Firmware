@@ -563,13 +563,11 @@ def _resolve_led_state(state, power):
 
 
 async def power_mode_loop(state, power, select_pin, settings,
-                          boot_pin=None,
                           menu_pin=None,
                           network=None,
                           tick_ms=100,
                           auto_charge_idle_s=30,
                           fault_clear_s=60,
-                          reprovision_hold_s=5,
                           charge_hold_s=2):
     """Drive the STREAM/STANDBY/CHARGE state machine + SELECT button cycle.
 
@@ -586,27 +584,26 @@ async def power_mode_loop(state, power, select_pin, settings,
         red-blink reverts to normal once the device has demonstrated
         stability.
 
-    SELECT button: if pin_value==1 always (not soldered yet on current
-    V4 units) the polling no-ops gracefully; auto-enter still works.
-    Tory can solder SELECT later and behavior lights up.
+    CONTROL SCHEME (V4 button topology confirmed from schematic
+    2026-07-02: MENU=GPIO21, SELECT=GPIO10; the "BOOT" button is wired
+    to EN = hardware reset, NOT a readable GPIO, so it can only reset
+    the chip and carries no firmware action):
 
-    BOOT button (GPIO0, populated on all V4 units): held for
-    reprovision_hold_s seconds during runtime -> wipe Wi-Fi creds ->
-    reboot into AP provisioning mode (Layer 2, PROVISIONING.md +
-    board #0312 P0.4). This is the no-USB recovery path at a foreign
-    venue where the band cannot join its stored SSID and therefore
-    cannot be reached over the network. A short BOOT tap does nothing
-    at runtime (the strap only matters at reset), so accidental
-    presses are harmless; only a deliberate 5-second hold wipes.
+      MENU held 2 s        -> toggle CHARGE mode
+      SELECT short press    -> toggle STANDBY <-> STREAM
+      (in CHARGE) either    -> leave CHARGE (reboots for clean Wi-Fi)
+      MENU + SELECT held 3s -> wipe Wi-Fi creds -> AP reprovision
 
-    MENU button (GPIO21): held for charge_hold_s seconds -> toggle
-    CHARGE mode (Tory 2026-07-02). Entering CHARGE turns the Wi-Fi
-    RADIO OFF and drops the CPU to 80 MHz so nearly all of the
-    LTC4054's ~150 mA charge current reaches the battery instead of
-    feeding the radio (the reason the green CHRG LED never went out).
-    Holding MENU again exits back to STREAM: CPU to 240 MHz, radio
-    on, reconnect spawned. LED: purple pulse while charging, solid
+    CHARGE turns the Wi-Fi RADIO OFF and drops the CPU to 80 MHz so
+    nearly all of the STC4054's programmed charge current reaches the
+    battery instead of feeding the radio (the reason the green CHRG LED
+    never went out on a weak port). LED: purple pulse charging, solid
     purple at full.
+
+    LEAVING CHARGE REBOOTS. sta.active(False) -> active(True) does not
+    reliably rejoin the AP on ESP32-S3 (this was the "held the button
+    and it never came back onto Wi-Fi" symptom). A reboot always lands
+    in STREAM with Wi-Fi up, which for a charging device is fine.
 
     Hardened with SystemExit/CancelledError re-raise + BaseException
     catch matching the rest of the V4 loops (board #0166)."""
@@ -626,129 +623,118 @@ async def power_mode_loop(state, power, select_pin, settings,
                 logger.warn("Wi-Fi off failed: {}".format(e))
         logger.info("CHARGE entered ({}): Wi-Fi off, CPU 80MHz".format(reason))
 
-    def _exit_charge(reason):
-        try:
-            machine.freq(240_000_000)
-        except Exception as e:
-            logger.warn("freq(240MHz) failed: {}".format(e))
-        if network is not None:
-            try:
-                network.sta.active(True)
-                # Reconnect in the background; announce_loop's rising-edge
-                # detection re-registers mDNS once the join lands, and the
-                # hub re-subscribes off the resumed beacon.
-                asyncio.create_task(network.connect())
-            except Exception as e:
-                logger.warn("Wi-Fi resume failed: {}".format(e))
-        state.power_mode = "stream"
-        state.streaming = True
-        state.idle_seconds = 0
-        logger.info("CHARGE exited ({}): Wi-Fi resuming, CPU 240MHz".format(reason))
+    def _leave_charge(reason):
+        # Reboot for a guaranteed-clean Wi-Fi bring-up (see docstring).
+        # logger.warn flushes before the reset so the reason is durable.
+        logger.warn("CHARGE exit ({}): rebooting for clean Wi-Fi".format(reason))
+        machine.reset()
 
-    last_press_ms = 0
-    DEBOUNCE_MS = 200
+    def _wipe_and_reprovision(reason):
+        logger.warn("{}: wiping Wi-Fi creds -> AP provisioning".format(reason))
+        try:
+            settings["wifi_ssid"] = ""
+            settings["wifi_password"] = ""
+            SettingsManager.save(settings)
+        except Exception as e:
+            logger.error("Cred wipe failed; NOT rebooting: {}".format(e))
+            return
+        machine.reset()
+
+    DEBOUNCE_MS = 250
     tick_count = 0
-    boot_held_ticks = 0
     menu_held_ticks = 0
     menu_latched = False
-    # BOOT release windows: [charge_hold, charge_max) = charge toggle;
-    # [reprovision_hold, inf) = wipe. The 6-8 s gap is a dead zone so a
-    # user aiming for one action cannot accidentally land the other.
-    reprovision_hold_ticks = max(1, (8 * 1000) // tick_ms)
-    charge_hold_ticks = max(1, (charge_hold_s * 1000) // tick_ms)
-    charge_max_ticks = max(charge_hold_ticks + 1, (6 * 1000) // tick_ms)
+    chord_held_ticks = 0
+    chord_latched = False
+    last_select_ms = 0
+    charge_hold_ticks = max(1, (charge_hold_s * 1000) // tick_ms)   # 2 s
+    chord_hold_ticks = max(1, (3 * 1000) // tick_ms)                # 3 s
     prev_vbus = power.is_vbus_present()
     fault_started_ms = time.ticks_ms() if state.in_fault else None
     while True:
         try:
             now_ms = time.ticks_ms()
-            # 1) SELECT button (active-LOW). Falling-edge detection with
-            #    debounce. Read once per tick; cheap.
-            try:
-                pressed = select_pin.value() == 0
-            except Exception:
-                pressed = False
-            if pressed and time.ticks_diff(now_ms, last_press_ms) > DEBOUNCE_MS:
-                last_press_ms = now_ms
-                state.cycle_power_mode(power.is_vbus_present())
-
-            # 1a) MENU held charge_hold_s -> toggle CHARGE mode. Latched so
-            #     one continuous hold toggles exactly once (the user must
-            #     release before the next toggle registers).
             try:
                 menu_down = menu_pin.value() == 0
             except Exception:
                 menu_down = False
-            if menu_down:
-                menu_held_ticks += 1
-                if menu_held_ticks >= charge_hold_ticks and not menu_latched:
-                    menu_latched = True
-                    if state.power_mode == "charge":
-                        _exit_charge("MENU hold")
-                    else:
-                        _enter_charge("MENU hold")
-            else:
+            try:
+                sel_down = select_pin.value() == 0
+            except Exception:
+                sel_down = False
+
+            # A) MENU + SELECT chord held 3 s -> reprovision wipe. Checked
+            #    first so a deliberate two-finger hold never triggers the
+            #    single-button actions. LED previews magenta while held.
+            if menu_down and sel_down:
+                chord_held_ticks += 1
+                state.hold_preview = "wipe"
+                if chord_held_ticks >= chord_hold_ticks and not chord_latched:
+                    chord_latched = True
+                    _wipe_and_reprovision("MENU+SELECT held {}s".format(
+                        (chord_held_ticks * tick_ms) // 1000))
+                # Skip single-button handling while the chord is forming.
                 menu_held_ticks = 0
                 menu_latched = False
-
-            # 1b) BOOT dual-action, decided ON RELEASE by hold duration
-            #     (MENU is unsoldered on as-built V4, so BOOT carries the
-            #     charge toggle too):
-            #       release after 2-6 s  -> toggle CHARGE mode
-            #       release after >= 8 s -> Layer 2 wipe -> AP reprovision
-            #     While held past a threshold the LED previews the action
-            #     (purple pulse = charge, magenta blink = wipe) via
-            #     state.hold_preview, so the user knows when to let go.
-            try:
-                boot_down = boot_pin.value() == 0
-            except Exception:
-                boot_down = False
-            if boot_down:
-                boot_held_ticks += 1
-                if boot_held_ticks >= reprovision_hold_ticks:
-                    state.hold_preview = "wipe"
-                elif boot_held_ticks >= charge_hold_ticks:
-                    state.hold_preview = "charge"
             else:
-                held = boot_held_ticks
-                boot_held_ticks = 0
-                state.hold_preview = None
-                if held >= reprovision_hold_ticks:
-                    logger.warn("BOOT released after {}s: wiping Wi-Fi creds; rebooting to AP provisioning".format(
-                        (held * tick_ms) // 1000))
-                    try:
-                        settings["wifi_ssid"] = ""
-                        settings["wifi_password"] = ""
-                        SettingsManager.save(settings)
-                        await asyncio.sleep_ms(300)
-                        machine.reset()
-                    except Exception as e:
-                        logger.error("Cred wipe failed; NOT rebooting: {}".format(e))
-                elif charge_hold_ticks <= held < charge_max_ticks:
-                    if state.power_mode == "charge":
-                        _exit_charge("BOOT hold")
-                    else:
-                        _enter_charge("BOOT hold")
+                if chord_held_ticks:
+                    state.hold_preview = None
+                chord_held_ticks = 0
+                chord_latched = False
 
-            # 1c) Network-requested mode (set_power_mode cmd verb). The ack
-            #     was already written to the TCP socket by the cmd server
-            #     before this tick sees the request, so dropping the radio
-            #     here does not eat the reply.
+                # B) MENU held 2 s -> toggle CHARGE (one-shot per hold).
+                if menu_down:
+                    menu_held_ticks += 1
+                    if menu_held_ticks >= charge_hold_ticks:
+                        state.hold_preview = "charge"
+                        if not menu_latched:
+                            menu_latched = True
+                            if state.power_mode == "charge":
+                                _leave_charge("MENU hold")   # reboots
+                            else:
+                                _enter_charge("MENU hold")
+                else:
+                    if menu_held_ticks:
+                        state.hold_preview = None
+                    menu_held_ticks = 0
+                    menu_latched = False
+
+                    # C) SELECT short press (only when MENU isn't held).
+                    #    In CHARGE -> leave (reboot). Else toggle STANDBY.
+                    if sel_down and time.ticks_diff(now_ms, last_select_ms) > DEBOUNCE_MS:
+                        last_select_ms = now_ms
+                        if state.power_mode == "charge":
+                            _leave_charge("SELECT")   # reboots
+                        elif state.power_mode == "standby":
+                            state.power_mode = "stream"
+                            state.streaming = True
+                            logger.info("SELECT: STANDBY -> STREAM")
+                        else:
+                            state.power_mode = "standby"
+                            state.streaming = False
+                            logger.info("SELECT: STREAM -> STANDBY")
+
+            # D) Network-requested mode (set_power_mode cmd verb). The ack
+            #    already flushed before this tick, so acting here (incl.
+            #    a reboot to leave charge) does not eat the reply.
             req = state.requested_power_mode
             if req:
                 state.requested_power_mode = None
-                if req == "charge" and state.power_mode != "charge":
-                    _enter_charge("cmd")
+                if req == "charge":
+                    if state.power_mode != "charge":
+                        _enter_charge("cmd")
                 elif req == "stream":
                     if state.power_mode == "charge":
-                        _exit_charge("cmd")
-                    state.power_mode = "stream"
-                    state.streaming = True
+                        _leave_charge("cmd stream")   # reboots into stream
+                    else:
+                        state.power_mode = "stream"
+                        state.streaming = True
                 elif req == "standby":
                     if state.power_mode == "charge":
-                        _exit_charge("cmd")
-                    state.power_mode = "standby"
-                    state.streaming = False
+                        _leave_charge("cmd standby")  # reboot lands in stream
+                    else:
+                        state.power_mode = "standby"
+                        state.streaming = False
 
             # 2) VBUS + battery-full update at 1 Hz.
             tick_count += 1
@@ -777,7 +763,7 @@ async def power_mode_loop(state, power, select_pin, settings,
                     _enter_charge("USB + idle {}s".format(auto_charge_idle_s))
                 elif (state.power_mode == "charge"
                         and prev_vbus and not vbus_now):
-                    _exit_charge("USB unplugged")
+                    _leave_charge("USB unplugged")   # reboots into stream
                 prev_vbus = vbus_now
 
                 # 5) Auto-clear in_fault after fault_clear_s of clean runtime.
@@ -964,24 +950,14 @@ async def main():
             def value(self):
                 return 1
         select_pin = _NoPin()
-    # BOOT button (GPIO0, strap pin, populated on every V4). Runtime
-    # read is safe; the strap only matters at reset. Held 5 s -> Layer 2
-    # reprovision wipe (power_mode_loop). Same graceful fallback.
-    try:
-        boot_pin = Pin(pinmap.BTN_BOOT, Pin.IN, Pin.PULL_UP)
-    except Exception as e:
-        logger.warn("BOOT button init failed (reprovision chord disabled): {}".format(e))
-        class _NoPin2:
-            def value(self):
-                return 1
-        boot_pin = _NoPin2()
     # MENU button (GPIO21). Held 2 s -> toggle CHARGE mode (Wi-Fi off,
-    # purple LED; Tory 2026-07-02). Inert until the button is soldered;
-    # same graceful fallback as SELECT/BOOT.
+    # purple LED; Tory 2026-07-02). NOTE: the physical "BOOT" button on
+    # V4 is wired to EN (hardware reset), NOT GPIO0, so it carries no
+    # firmware action -- MENU + SELECT are the only readable controls.
     try:
         menu_pin = Pin(pinmap.BTN_MENU, Pin.IN, Pin.PULL_UP)
     except Exception as e:
-        logger.warn("MENU button init failed (charge chord disabled): {}".format(e))
+        logger.warn("MENU button init failed (charge toggle disabled): {}".format(e))
         class _NoPin3:
             def value(self):
                 return 1
@@ -1051,7 +1027,6 @@ async def main():
     # and refreshes VBUS-present + battery-full bits the LED resolver
     # reads. Cheap (100 ms tick, ~1 % CPU).
     asyncio.create_task(power_mode_loop(state, power, select_pin, settings,
-                                        boot_pin=boot_pin,
                                         menu_pin=menu_pin,
                                         network=network))
     asyncio.create_task(gc_loop())

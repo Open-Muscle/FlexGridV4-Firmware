@@ -53,12 +53,18 @@ SD_CS    = 14   # PIN_TODO: confirm against V4 schematic (V3 reserved 14 as a ge
 
 # ---------------------------------------------------------------------------
 # User input buttons (active LOW, internal pull-up)
-# Unchanged from V3.
+# Verified against the V4 schematic 2026-07-02 (SELECT1 -> net SELECT ->
+# IO10; MENU1 -> net MENU -> IO21). MENU + SELECT are the ONLY readable
+# button GPIOs.
+#
+# IMPORTANT: the silkscreen "BOOT" button (BOOT1) is wired to EN (chip
+# reset), NOT to GPIO0. Pressing it reboots the chip; it cannot be read
+# as an input. Do not hang firmware actions on GPIO0 -- it floats.
 # ---------------------------------------------------------------------------
-BTN_BOOT   = 0     # strap pin - also enters download mode at reset if held
-BTN_SELECT = 10
-BTN_MENU   = 21
-# RESET button is hardwired to chip EN, not GPIO
+BTN_SELECT = 10    # SELECT1 -> IO10
+BTN_MENU   = 21    # MENU1   -> IO21
+# BTN_BOOT (GPIO0) intentionally removed: the physical BOOT button pulls
+# EN (reset), so GPIO0 has no button on it.
 
 # ---------------------------------------------------------------------------
 # Power management
