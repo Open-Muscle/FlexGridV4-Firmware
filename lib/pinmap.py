@@ -62,10 +62,14 @@ BTN_MENU   = 21
 
 # ---------------------------------------------------------------------------
 # Power management
-# Unchanged from V3.
 # ---------------------------------------------------------------------------
 PWR_OFF  = 45      # drive HIGH momentarily to tell MAX16054 to drop power
 ADC_BAT  = 18      # battery voltage divider
+# VBUS presence detect (discovered in the V4 netlist 2026-07-02): USB VBUS
+# through a 10k series (R19) with 100k pulldown (R20) into module pad 32 =
+# GPIO39. Reads 1 when USB power is present, 0 when on battery. Replaces
+# the VBAT-threshold heuristic for charge-mode entry/exit.
+VBUS_STAT = 39
 
 # ---------------------------------------------------------------------------
 # Haptic motor (NEW: driver populated on V4 but defaults OFF)

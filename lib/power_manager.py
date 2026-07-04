@@ -60,12 +60,20 @@ class PowerManager:
         # Probe for read_uv() once at init -- avoids per-call exception cost.
         self._has_read_uv = hasattr(self.bat_adc, "read_uv")
 
-        # Hysteretic VBUS-present flag. Initialized by sampling once at
-        # construction so we report the right state on the very first
-        # call to is_vbus_present() instead of having to wait for the
-        # power-mode loop to update it.
+        # VBUS presence. Preferred source: the GPIO39 divider (R19/R20
+        # off USB VBUS, found in the V4 netlist 2026-07-02) - a real
+        # digital signal with clean edges. Fallback when the pin init
+        # fails (or on hardware without the divider): the hysteretic
+        # VBAT-threshold heuristic below, which is known to miss the
+        # unplug edge on a nearly-full battery.
+        self._vbus_pin = None
+        try:
+            self._vbus_pin = Pin(pinmap.VBUS_STAT, Pin.IN)
+        except Exception:
+            pass
         v0 = self.battery_voltage()
-        self._vbus_present = v0 >= self.VBUS_PRESENT_ENTER_V
+        self._vbus_present = (self._vbus_pin.value() == 1) if self._vbus_pin \
+            else (v0 >= self.VBUS_PRESENT_ENTER_V)
         self._full_streak = 0
 
     def battery_raw(self):
@@ -104,19 +112,28 @@ class PowerManager:
         return int((v - self.LIPO_EMPTY) / (self.LIPO_FULL - self.LIPO_EMPTY) * 100)
 
     def update_vbus_state(self):
-        """Re-evaluate the VBUS-present + battery-full flags from a fresh
-        battery reading. Hysteretic so the bit does not chatter at the
-        threshold. Call from a periodic power-mode loop (1 Hz is fine).
-        Returns the current (vbus_present, battery_full) tuple."""
+        """Re-evaluate the VBUS-present + battery-full flags. Prefers the
+        GPIO39 hardware detect (exact, edge-clean); falls back to the
+        hysteretic VBAT threshold when the pin is unavailable. Call from
+        a periodic power-mode loop (1 Hz is fine). Returns the current
+        (vbus_present, battery_full) tuple."""
         v = self.battery_voltage()
-        if self._vbus_present:
-            # Sticky: only drop to False when we cross the lower threshold
-            if v < self.VBUS_PRESENT_EXIT_V:
-                self._vbus_present = False
-                self._full_streak = 0
-        else:
-            if v >= self.VBUS_PRESENT_ENTER_V:
-                self._vbus_present = True
+        if self._vbus_pin is not None:
+            try:
+                self._vbus_present = self._vbus_pin.value() == 1
+                if not self._vbus_present:
+                    self._full_streak = 0
+            except Exception:
+                self._vbus_pin = None   # fall back permanently this boot
+        if self._vbus_pin is None:
+            if self._vbus_present:
+                # Sticky: only drop to False below the lower threshold
+                if v < self.VBUS_PRESENT_EXIT_V:
+                    self._vbus_present = False
+                    self._full_streak = 0
+            else:
+                if v >= self.VBUS_PRESENT_ENTER_V:
+                    self._vbus_present = True
 
         # battery_full requires VBUS present AND several consecutive
         # samples at/above the CV-trickle threshold. Without the streak
