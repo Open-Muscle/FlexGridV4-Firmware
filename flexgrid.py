@@ -187,6 +187,15 @@ class _DeviceState:
         # Idle-seconds counter incremented by power_mode_loop when in
         # STREAM with no subscribers; gates auto-enter to CHARGE.
         self.idle_seconds     = 0
+        # LED preview while a button is held past an action threshold:
+        # None | "charge" | "wipe". Set by power_mode_loop, read by
+        # _resolve_led_state so the user sees which action release will
+        # trigger (purple = charge toggle, magenta = wifi wipe).
+        self.hold_preview     = None
+        # Network-requested mode ("stream"/"standby"/"charge") set by the
+        # set_power_mode cmd verb; applied by power_mode_loop within a
+        # tick so the ack flushes before the radio drops.
+        self.requested_power_mode = None
 
     def set_scan_interval(self, ms):
         self.scan_interval_ms = int(ms)
@@ -525,6 +534,13 @@ def _resolve_led_state(state, power):
         return "fault"
     if getattr(state, "in_sleep", False):
         return "sleep"
+    # Button-hold preview beats mode display: while BOOT is held past a
+    # threshold the LED shows which action RELEASING now will trigger.
+    hp = getattr(state, "hold_preview", None)
+    if hp == "wipe":
+        return "ap_provisioning"   # magenta blink = release wipes Wi-Fi
+    if hp == "charge":
+        return "charging"          # purple pulse = release toggles charge
     mode = getattr(state, "power_mode", "stream")
     if mode == "standby":
         return "standby"
@@ -635,8 +651,12 @@ async def power_mode_loop(state, power, select_pin, settings,
     boot_held_ticks = 0
     menu_held_ticks = 0
     menu_latched = False
-    reprovision_hold_ticks = max(1, (reprovision_hold_s * 1000) // tick_ms)
+    # BOOT release windows: [charge_hold, charge_max) = charge toggle;
+    # [reprovision_hold, inf) = wipe. The 6-8 s gap is a dead zone so a
+    # user aiming for one action cannot accidentally land the other.
+    reprovision_hold_ticks = max(1, (8 * 1000) // tick_ms)
     charge_hold_ticks = max(1, (charge_hold_s * 1000) // tick_ms)
+    charge_max_ticks = max(charge_hold_ticks + 1, (6 * 1000) // tick_ms)
     prev_vbus = power.is_vbus_present()
     fault_started_ms = time.ticks_ms() if state.in_fault else None
     while True:
@@ -671,31 +691,64 @@ async def power_mode_loop(state, power, select_pin, settings,
                 menu_held_ticks = 0
                 menu_latched = False
 
-            # 1b) BOOT held -> Layer 2 reprovision wipe. Counts consecutive
-            #     held ticks so a bounce or brief tap never accumulates.
+            # 1b) BOOT dual-action, decided ON RELEASE by hold duration
+            #     (MENU is unsoldered on as-built V4, so BOOT carries the
+            #     charge toggle too):
+            #       release after 2-6 s  -> toggle CHARGE mode
+            #       release after >= 8 s -> Layer 2 wipe -> AP reprovision
+            #     While held past a threshold the LED previews the action
+            #     (purple pulse = charge, magenta blink = wipe) via
+            #     state.hold_preview, so the user knows when to let go.
             try:
                 boot_down = boot_pin.value() == 0
             except Exception:
                 boot_down = False
             if boot_down:
                 boot_held_ticks += 1
-                if boot_held_ticks == reprovision_hold_ticks:
-                    logger.warn("BOOT held {}s: wiping Wi-Fi creds; rebooting to AP provisioning".format(
-                        reprovision_hold_s))
+                if boot_held_ticks >= reprovision_hold_ticks:
+                    state.hold_preview = "wipe"
+                elif boot_held_ticks >= charge_hold_ticks:
+                    state.hold_preview = "charge"
+            else:
+                held = boot_held_ticks
+                boot_held_ticks = 0
+                state.hold_preview = None
+                if held >= reprovision_hold_ticks:
+                    logger.warn("BOOT released after {}s: wiping Wi-Fi creds; rebooting to AP provisioning".format(
+                        (held * tick_ms) // 1000))
                     try:
                         settings["wifi_ssid"] = ""
                         settings["wifi_password"] = ""
                         SettingsManager.save(settings)
+                        await asyncio.sleep_ms(300)
+                        machine.reset()
                     except Exception as e:
                         logger.error("Cred wipe failed; NOT rebooting: {}".format(e))
-                        boot_held_ticks = 0
-                        continue
-                    # Brief red flash so the user knows the hold registered,
-                    # then reset. The AP branch shows magenta after boot.
-                    await asyncio.sleep_ms(300)
-                    machine.reset()
-            else:
-                boot_held_ticks = 0
+                elif charge_hold_ticks <= held < charge_max_ticks:
+                    if state.power_mode == "charge":
+                        _exit_charge("BOOT hold")
+                    else:
+                        _enter_charge("BOOT hold")
+
+            # 1c) Network-requested mode (set_power_mode cmd verb). The ack
+            #     was already written to the TCP socket by the cmd server
+            #     before this tick sees the request, so dropping the radio
+            #     here does not eat the reply.
+            req = state.requested_power_mode
+            if req:
+                state.requested_power_mode = None
+                if req == "charge" and state.power_mode != "charge":
+                    _enter_charge("cmd")
+                elif req == "stream":
+                    if state.power_mode == "charge":
+                        _exit_charge("cmd")
+                    state.power_mode = "stream"
+                    state.streaming = True
+                elif req == "standby":
+                    if state.power_mode == "charge":
+                        _exit_charge("cmd")
+                    state.power_mode = "standby"
+                    state.streaming = False
 
             # 2) VBUS + battery-full update at 1 Hz.
             tick_count += 1

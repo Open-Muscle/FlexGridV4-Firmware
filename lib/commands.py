@@ -296,6 +296,24 @@ def build_handlers(device_state):
                 logger.warn("set_role persist failed: {}".format(e))
         return {"role": device_state.role}
 
+    async def set_power_mode(data, peer):
+        """Network-commanded power mode (board #0323 follow-up): lets a
+        hub put the band into CHARGE (Wi-Fi off, purple LED) without
+        the MENU button, which is unsoldered on as-built V4 units.
+
+        mode: "stream" | "standby" | "charge". The request is queued on
+        device_state and applied by power_mode_loop within ~100 ms, so
+        this ack reaches the hub BEFORE the radio drops. Exiting charge
+        afterwards requires a physical action (BOOT hold 2-6 s or USB
+        unplug) since the device is off the network by design."""
+        mode = data.get("mode", "")
+        if mode not in ("stream", "standby", "charge"):
+            raise ValueError("mode must be stream|standby|charge: {}".format(mode))
+        device_state.requested_power_mode = mode
+        return {"power_mode": mode,
+                "applies_in_ms": 100,
+                "note": "charge turns Wi-Fi off; exit via BOOT hold 2-6s or USB unplug"}
+
     return {
         "subscribe":     subscribe,
         "unsubscribe":   unsubscribe,
@@ -306,4 +324,5 @@ def build_handlers(device_state):
         "stop_stream":   stop_stream,
         "reboot":        reboot,
         "set_role":      set_role,
+        "set_power_mode": set_power_mode,
     }
