@@ -42,9 +42,16 @@ class SDLogger:
         self.frames_written = 0
         self.session_id = None
         # Pre-build the CSV header once so we do not rebuild it for every session.
+        # Columns: timestamp, the 60 (15x4) sensor cells, 4 label slots, and
+        # the 6 IMU channels (gyro xyz then accel xyz, raw counts). The IMU
+        # columns make on-device captures directly usable for the forearm /
+        # orientation ML work; a consumer normalizes raw counts with the
+        # device's per-chip scale (announce/get_info imu block).
         cols, rows = self.matrix_dims
         cell_headers = ["R{}C{}".format(r, c) for r in range(rows) for c in range(cols)]
-        self.csv_header = "timestamp," + ",".join(cell_headers) + ",label_0,label_1,label_2,label_3\n"
+        self.csv_header = ("timestamp," + ",".join(cell_headers)
+                           + ",label_0,label_1,label_2,label_3"
+                           + ",imu_gx,imu_gy,imu_gz,imu_ax,imu_ay,imu_az\n")
 
     def mount(self):
         """Mount the SD card under /sd. Best-effort; returns True on success.
@@ -118,15 +125,18 @@ class SDLogger:
             self.session_id = None
             self.frames_written = 0
 
-    def write_frame(self, matrix, labels=None):
-        """Append one row to the session file: timestamp + flattened matrix
-        + labels. If labels is None, writes 0,0,0,0 placeholders so the CSV
-        always has a consistent column count (the PC trainer expects 4 label
-        columns).
+    def write_frame(self, matrix, labels=None, imu=None):
+        """Append one row: timestamp + flattened matrix + labels + IMU.
 
-        matrix is column-major: matrix[col][row]. The flatten order is
-        row-major per WIRE-FORMAT.md section 2.2:
-            R0C0..R0C14, R1C0..R1C14, R2C0..R2C14, R3C0..R3C14
+        matrix is column-major (matrix[col][row]); flattened row-major per
+        WIRE-FORMAT.md 2.2: R0C0..R0C14, R1C0..R1C14, R2C0..R2C14, R3C0..R3C14.
+
+        labels: 4-element list; None writes 0,0,0,0 placeholders so the column
+        count stays constant.
+
+        imu: dict {"gyro":[gx,gy,gz], "accel":[ax,ay,az]} (raw counts, same
+        shape as data.imu), or None. None writes empty cells (NOT fake zeros)
+        so absent-IMU rows are distinguishable from a real zero reading.
         """
         if self.current_file is None:
             return
@@ -136,10 +146,16 @@ class SDLogger:
         flat = [matrix[c][r] for r in range(rows) for c in range(cols)]
         if labels is None:
             labels = [0, 0, 0, 0]
-        line = "{},{},{}\n".format(
+        if imu and "gyro" in imu and "accel" in imu:
+            g = imu["gyro"]; a = imu["accel"]
+            imu_str = "{},{},{},{},{},{}".format(g[0], g[1], g[2], a[0], a[1], a[2])
+        else:
+            imu_str = ",,,,,"   # six empty cells
+        line = "{},{},{},{}\n".format(
             ts,
             ",".join(str(v) for v in flat),
             ",".join(str(v) for v in labels),
+            imu_str,
         )
         try:
             self.current_file.write(line)
@@ -153,6 +169,11 @@ class SDLogger:
             logger.warn("SD write_frame failed (closing session): {}".format(e))
             # Disable to prevent a write-storm on a full / pulled card.
             self.end_session()
+
+    def force_enable(self):
+        """Allow record mode to start a session even when the sd_logging
+        setting defaulted False. Record mode is an explicit user action."""
+        self.enabled = True
 
     def is_recording(self):
         return self.current_file is not None

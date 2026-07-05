@@ -303,10 +303,11 @@ async def sensor_loop(state, sensor_matrix, network, sd):
                 await network.send_sensor(matrix, meta=meta, imu=state.imu_cache)
                 t_emit_end = time.ticks_us()
             # SD recording is independent of streaming; the user may want
-            # to log offline while no hub is around.
+            # to log offline while no hub is around (record mode = Wi-Fi off
+            # + logging, for unsupervised ML capture). IMU rides each row.
             if sd.is_recording():
                 _current_op = "sd_write"
-                sd.write_frame(matrix)
+                sd.write_frame(matrix, imu=state.imu_cache)
             _current_op = "sleep"
             err_count = 0
             # Profile accumulators
@@ -541,7 +542,11 @@ def _resolve_led_state(state, power):
         return "ap_provisioning"   # magenta blink = release wipes Wi-Fi
     if hp == "charge":
         return "charging"          # purple pulse = release toggles charge
+    if hp == "record":
+        return "record"            # green breath = release toggles record
     mode = getattr(state, "power_mode", "stream")
+    if mode == "record":
+        return "record"
     if mode == "standby":
         return "standby"
     if mode == "charge":
@@ -565,6 +570,7 @@ def _resolve_led_state(state, power):
 async def power_mode_loop(state, power, select_pin, settings,
                           menu_pin=None,
                           network=None,
+                          sd=None,
                           tick_ms=100,
                           auto_charge_idle_s=30,
                           fault_clear_s=60,
@@ -590,8 +596,12 @@ async def power_mode_loop(state, power, select_pin, settings,
     the chip and carries no firmware action):
 
       MENU held 2 s        -> toggle CHARGE mode
-      SELECT short press    -> toggle STANDBY <-> STREAM
-      (in CHARGE) either    -> leave CHARGE (reboots for clean Wi-Fi)
+      SELECT tap            -> toggle STANDBY <-> STREAM
+      SELECT held 2 s       -> toggle RECORD (Wi-Fi off + SD logging;
+                               unsupervised ML capture)
+      (in CHARGE/RECORD) a  -> SELECT tap or hold leaves the mode
+                               (reboots for clean Wi-Fi; RECORD closes
+                               the SD session first)
       MENU + SELECT held 3s -> wipe Wi-Fi creds -> AP reprovision
 
     CHARGE turns the Wi-Fi RADIO OFF and drops the CPU to 80 MHz so
@@ -640,14 +650,53 @@ async def power_mode_loop(state, power, select_pin, settings,
             return
         machine.reset()
 
+    def _enter_record(reason):
+        # Unsupervised local capture: Wi-Fi OFF, sensor scan continues at
+        # full speed (240 MHz -- SD writes + scan need it), SD session open.
+        # sensor_loop writes each frame (matrix + labels + IMU) while
+        # sd.is_recording(). Green breathing LED.
+        if sd is None:
+            logger.warn("record requested but no SD logger; ignoring")
+            return
+        state.power_mode = "record"
+        state.streaming = False
+        state.idle_seconds = 0
+        if network is not None:
+            try:
+                network.sta.active(False)
+            except Exception as e:
+                logger.warn("Wi-Fi off failed: {}".format(e))
+        try:
+            sd.force_enable()
+            if sd.mount() and sd.start_session():
+                logger.info("RECORD entered ({}): Wi-Fi off, SD session open".format(reason))
+            else:
+                logger.warn("RECORD: SD mount/session failed; capturing nothing (card in?)")
+        except Exception as e:
+            logger.warn("RECORD start failed: {}".format(e))
+
+    def _leave_record(reason):
+        # Close the SD file cleanly BEFORE the reboot so the last buffered
+        # frames are flushed, then reboot for a clean Wi-Fi bring-up.
+        if sd is not None:
+            try:
+                sd.end_session()
+            except Exception as e:
+                logger.warn("RECORD end_session failed: {}".format(e))
+        logger.warn("RECORD exit ({}): SD closed, rebooting for clean Wi-Fi".format(reason))
+        machine.reset()
+
     DEBOUNCE_MS = 250
     tick_count = 0
     menu_held_ticks = 0
     menu_latched = False
     chord_held_ticks = 0
     chord_latched = False
+    sel_held_ticks = 0
+    sel_latched = False
     last_select_ms = 0
     charge_hold_ticks = max(1, (charge_hold_s * 1000) // tick_ms)   # 2 s
+    record_hold_ticks = charge_hold_ticks                          # SELECT hold 2 s
     chord_hold_ticks = max(1, (3 * 1000) // tick_ms)                # 3 s
     prev_vbus = power.is_vbus_present()
     fault_started_ms = time.ticks_ms() if state.in_fault else None
@@ -693,26 +742,51 @@ async def power_mode_loop(state, power, select_pin, settings,
                                 _leave_charge("MENU hold")   # reboots
                             else:
                                 _enter_charge("MENU hold")
+                    # MENU has priority; do not accumulate a SELECT hold too.
+                    sel_held_ticks = 0
+                    sel_latched = False
                 else:
                     if menu_held_ticks:
                         state.hold_preview = None
                     menu_held_ticks = 0
                     menu_latched = False
 
-                    # C) SELECT short press (only when MENU isn't held).
-                    #    In CHARGE -> leave (reboot). Else toggle STANDBY.
-                    if sel_down and time.ticks_diff(now_ms, last_select_ms) > DEBOUNCE_MS:
-                        last_select_ms = now_ms
-                        if state.power_mode == "charge":
-                            _leave_charge("SELECT")   # reboots
-                        elif state.power_mode == "standby":
-                            state.power_mode = "stream"
-                            state.streaming = True
-                            logger.info("SELECT: STANDBY -> STREAM")
-                        else:
-                            state.power_mode = "standby"
-                            state.streaming = False
-                            logger.info("SELECT: STREAM -> STANDBY")
+                    # C) SELECT: TAP -> toggle STANDBY (or leave charge/record);
+                    #    HOLD 2 s -> toggle RECORD (unsupervised SD logging).
+                    #    Tap is decided on release (short press, record not
+                    #    latched); the hold fires at the 2 s mark.
+                    if sel_down:
+                        sel_held_ticks += 1
+                        if sel_held_ticks >= record_hold_ticks:
+                            state.hold_preview = "record"
+                            if not sel_latched:
+                                sel_latched = True
+                                if state.power_mode == "record":
+                                    _leave_record("SELECT hold")  # reboots
+                                else:
+                                    _enter_record("SELECT hold")
+                    else:
+                        if sel_held_ticks and state.hold_preview == "record":
+                            state.hold_preview = None
+                        # Short tap on release -> the light STANDBY toggle.
+                        if (sel_held_ticks and not sel_latched
+                                and sel_held_ticks < record_hold_ticks
+                                and time.ticks_diff(now_ms, last_select_ms) > DEBOUNCE_MS):
+                            last_select_ms = now_ms
+                            if state.power_mode == "charge":
+                                _leave_charge("SELECT tap")     # reboots
+                            elif state.power_mode == "record":
+                                _leave_record("SELECT tap")     # reboots
+                            elif state.power_mode == "standby":
+                                state.power_mode = "stream"
+                                state.streaming = True
+                                logger.info("SELECT: STANDBY -> STREAM")
+                            else:
+                                state.power_mode = "standby"
+                                state.streaming = False
+                                logger.info("SELECT: STREAM -> STANDBY")
+                        sel_held_ticks = 0
+                        sel_latched = False
 
             # D) Network-requested mode (set_power_mode cmd verb). The ack
             #    already flushed before this tick, so acting here (incl.
@@ -720,18 +794,30 @@ async def power_mode_loop(state, power, select_pin, settings,
             req = state.requested_power_mode
             if req:
                 state.requested_power_mode = None
+                cur = state.power_mode
                 if req == "charge":
-                    if state.power_mode != "charge":
+                    if cur == "record":
+                        _leave_record("cmd charge")   # reboots; user re-enters charge
+                    elif cur != "charge":
                         _enter_charge("cmd")
+                elif req == "record":
+                    if cur == "charge":
+                        _leave_charge("cmd record")   # reboots; user re-requests record
+                    elif cur != "record":
+                        _enter_record("cmd")
                 elif req == "stream":
-                    if state.power_mode == "charge":
+                    if cur == "charge":
                         _leave_charge("cmd stream")   # reboots into stream
+                    elif cur == "record":
+                        _leave_record("cmd stream")   # reboots into stream
                     else:
                         state.power_mode = "stream"
                         state.streaming = True
                 elif req == "standby":
-                    if state.power_mode == "charge":
+                    if cur == "charge":
                         _leave_charge("cmd standby")  # reboot lands in stream
+                    elif cur == "record":
+                        _leave_record("cmd standby")  # reboot lands in stream
                     else:
                         state.power_mode = "standby"
                         state.streaming = False
@@ -1035,7 +1121,8 @@ async def main():
     # reads. Cheap (100 ms tick, ~1 % CPU).
     asyncio.create_task(power_mode_loop(state, power, select_pin, settings,
                                         menu_pin=menu_pin,
-                                        network=network))
+                                        network=network,
+                                        sd=sd))
     asyncio.create_task(gc_loop())
     asyncio.create_task(reboot_watcher(state))
     # Diagnostic for the V4 WDT-reset mystery (#0156). Logs gap-since-feed +

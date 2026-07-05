@@ -307,12 +307,11 @@ def build_handlers(device_state):
         afterwards requires a physical action (BOOT hold 2-6 s or USB
         unplug) since the device is off the network by design."""
         mode = data.get("mode", "")
-        if mode not in ("stream", "standby", "charge"):
-            raise ValueError("mode must be stream|standby|charge: {}".format(mode))
+        if mode not in ("stream", "standby", "charge", "record"):
+            raise ValueError("mode must be stream|standby|charge|record: {}".format(mode))
         device_state.requested_power_mode = mode
-        return {"power_mode": mode,
-                "applies_in_ms": 100,
-                "note": "charge turns Wi-Fi off; exit via BOOT hold 2-6s or USB unplug"}
+        note = "charge/record turn Wi-Fi off; exit via SELECT tap or MENU/SELECT hold on the device"
+        return {"power_mode": mode, "applies_in_ms": 100, "note": note}
 
     return {
         "subscribe":     subscribe,

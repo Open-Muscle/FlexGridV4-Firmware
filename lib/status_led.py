@@ -49,6 +49,8 @@ PALETTE_DEFAULT = {
     "streaming_on_usb": (200, 80,  0,   "stream_usb"),  # orange solid + brief cyan flash every 5s
     # --- STANDBY ---
     "standby":          (0,   140, 200, "breathe_slow"), # slow cyan breath, 3 s period
+    # --- RECORD (SD logging, unsupervised; Wi-Fi off) ---
+    "record":           (0,   200, 0,   "breathe"),      # green 1 Hz breath = capturing to SD
     # --- CHARGE mode (PURPLE per Tory 2026-07-02: "band turn purple") ---
     "charging":         (120, 0,   180, "pulse_1500"),  # slow purple pulse, 1.5 s period
     "charge_full":      (120, 0,   180, "solid"),       # solid purple = battery full
