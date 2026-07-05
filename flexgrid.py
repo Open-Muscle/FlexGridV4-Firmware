@@ -1006,7 +1006,14 @@ async def main():
     asyncio.create_task(cmd_server.serve_forever())
     asyncio.create_task(sensor_loop(state, sensor_matrix, network, sd))
     asyncio.create_task(display_loop(display, sensor_matrix))
-    asyncio.create_task(menu_loop(menu))
+    # NOTE: menu_loop(menu) is intentionally NOT spawned. MenuManager's
+    # check_buttons() busy-waits (`while pin.value()==0: pass`, no await)
+    # on any button hold, which froze the entire asyncio event loop and
+    # blocked power_mode_loop from accumulating the 2 s MENU hold -> so
+    # CHARGE never triggered even though GPIO21 read fine (board 2026-07-02
+    # diagnosis: MENU pin verified toggling at the REPL, but the hold was
+    # eaten by this loop). power_mode_loop now owns MENU + SELECT; the old
+    # OLED menu system is retired to avoid the two fighting for the pins.
     asyncio.create_task(status_loop(state, power, network, imu,
                                     settings.get("status_interval_s", 5)))
     # imu_loop is the sole I2C reader of the IMU; sensor_loop + status_loop
