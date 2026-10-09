@@ -746,8 +746,19 @@ class TestMenuButton(unittest.TestCase):
         network.sta.active.assert_not_called()
 
     def test_two_taps_reach_the_device_page(self):
-        st, _ = self.run_buttons([0, 0] + [1] * 70 + [0, 0])
-        self.assertEqual(st.status_page_now(time_now()), 1)
+        # The debounce is 250 ms of ticks_ms. Drive ticks_ms from a fake clock
+        # that moves 5 ms per call so the test does not depend on how finely
+        # this platform's real clock ticks.
+        import time
+        clock = {"t": 5000}
+
+        def fake_ticks():
+            clock["t"] += 5
+            return clock["t"]
+        with mock.patch.object(time, "ticks_ms", fake_ticks):
+            st, _ = self.run_buttons([0, 0] + [1] * 70 + [0, 0])
+            page = st.status_page_now(clock["t"])
+        self.assertEqual(page, 1)
 
     def test_hold_still_toggles_charge_and_is_not_also_a_tap(self):
         st, network = self.run_buttons([0] * 14)
