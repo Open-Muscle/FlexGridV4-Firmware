@@ -77,6 +77,7 @@ The buttons only work after the band has joined a network, so do these now.
 - [ ] The band restarts. Blue steady for a few seconds, then green for 2 s, then the screen shows `WIFI OK` and an IP address for 15 s, then the live grid. Write the IP down only if you need it.
 - [ ] Press on the sensors with a finger: the grid marks appear and grow with pressure.
 - [ ] Tap MENU: the status page appears (`WIFI OK`, address, id, role). Tap again: battery, mode, hubs, network. Tap again: grid.
+- [ ] Run the button tests below within five minutes of plugging in USB, or keep `openmuscle web` running, or unplug USB. A band on USB with no app listening drops Wi-Fi after five minutes and shows `CHARGING`, and a SELECT tap then restarts it instead of pausing.
 - [ ] Tap SELECT: `PAUSED`, light slow cyan breathing. Tap SELECT again: back to the grid.
 - [ ] Plug in USB and hold MENU for 2 s: `CHARGING / Wi-Fi off / unplug to resume`, light purple. Look at the small CHRG light on the board: it should be lit while the battery charges (see the confirm list in device-reference.md). Tap SELECT: the band restarts and rejoins.
 - [ ] If the kit offers SD recording: with a card in, hold SELECT for 2 s and see `RECORDING`; tap SELECT to stop. With **no card**, holding SELECT must show `NO SD CARD` and leave Wi-Fi on. If the kit ships without a card, check the second case and then confirm the band is still streaming and joined.
@@ -112,7 +113,7 @@ Each band wears one role colour in its idle pulse: **left** blue, **right** red,
   | `checkout is not on a git tag` (a warning) | Check out the release tag. Add `--require-tag` to make it a failure. |
 
   A missing SD card, or a missing motion sensor, shows as a warning, not a failure. Add `--require-sd` if the kit includes cards.
-- [ ] After `--reset` the band reboots and shows `WIFI SETUP` again. The log it makes now holds only the band's own boot lines, which still passes.
+- [ ] After `--reset` the band reboots and shows `WIFI SETUP` again. It may come back on a different COM number; run `mpremote connect list` again if `COM8` no longer answers. The log it makes now holds only the band's own boot lines, which still passes.
 
 The check never reads the Wi-Fi password back; it only reports whether one is saved.
 
@@ -136,10 +137,10 @@ The check never reads the Wi-Fi password back; it only reports whether one is sa
 
 ### G. Charge level and transport
 
-- [ ] Charge the band, then let it settle for a few minutes and read the battery on status page 2 (tap MENU twice). A typical shipping level is around 3.8 to 4.0 V (roughly 40 to 70 percent on the band's own scale). That is a starting suggestion, not a rule: **check the carrier's rules for lithium batteries before you choose a level and a package.** Never ship a flat battery (the check fails below 3.7 V) and never ship a band with a swollen or damaged cell.
+- [ ] Charge the band, then let it settle for a few minutes and read the voltage from the check output: run `python tools/kit_check.py COM8` with no options (it only reads, and it still passes in factory state) and look at the `[ok] battery: x.xx V` line. The band is in setup mode by now, so the MENU button does nothing and there is no status page to read. A typical shipping level is around 3.8 to 4.0 V. That is a starting suggestion, not a rule: **check the carrier's rules for lithium batteries before you choose a level and a package.** Never ship a flat battery (the check fails below 3.7 V) and never ship a band with a swollen or damaged cell.
 - [ ] Power state for transport: if the confirm list in [device-reference.md](device-reference.md#facts-still-to-confirm-on-a-physical-band) has settled that the power button fully switches the band off on battery, switch the band **off** (USB unplugged) before packing. A band left on in setup mode keeps its radio running and will be flat in days. Until that is confirmed, write on the packing slip that the first step is to charge the band.
 - [ ] Do not leave USB plugged in inside the box.
-- [ ] Re-read the battery after a day if the box will sit before shipping.
+- [ ] Re-read the battery after a day if the box will sit before shipping: run `python tools/kit_check.py COM8` again and compare the `battery` line.
 
 ### H. Box contents
 

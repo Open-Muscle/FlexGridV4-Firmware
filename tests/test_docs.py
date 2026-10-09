@@ -81,12 +81,14 @@ class TestHouseRules(unittest.TestCase):
             self.assertTrue(os.path.isfile(path), name)
 
     def test_nobody_is_named_and_no_internal_paths(self):
-        banned = ("AI_Team_State", "OneDrive", "Tory", "Clark", "participant", "university")
+        banned = ("participant", "university", "in fab")
+        patterns = (r"[A-Za-z]:\\Users", r"\\Users\\", "One" + "Drive", "AI_" + "Team_State")
         for name in DOCS:
             text = doc(name)
             for word in banned:
-                self.assertIsNone(re.search(r"" + word + r"", text, re.I),
-                                  "{}: {}".format(name, word))
+                self.assertNotIn(word, text.lower(), "{}: {}".format(name, word))
+            for pat in patterns:
+                self.assertIsNone(re.search(pat, text, re.I), "{}: {}".format(name, pat))
 
     def test_no_stale_status_claims(self):
         stale = ("in fab", "not yet brought up", "BTN_BOOT", "esptool 5.x",

@@ -12,7 +12,7 @@ Every line below was checked against the firmware source (file and function in t
 
 **OpenMuscle FlexGrid V4 band**
 
-**Switch on and charge.** Press the power button to switch the band on. Plug in USB-C to charge: the small CHRG light on the board is the charging truth. The band cannot be switched off while USB is plugged in.
+**Switch on and charge.** The band is switched on and off with its power button (how long to press is on the confirm list at the end). Plug in USB-C to charge: the small CHRG light on the board is the charging truth.
 
 **First time: give the band your Wi-Fi (2.4 GHz, with a password, no sign-in page).**
 

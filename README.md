@@ -20,7 +20,7 @@ Firmware version `v4.0.0`. MIT licence.
 
 ### 1. Charge it and switch it on
 
-Plug in a USB-C **data** cable (some cables only charge; either way the band charges). The small CHRG light on the board shows that the charger is working, whatever the band's screen says. Press the power button to switch the band on. The band cannot be switched off while USB is plugged in.
+Plug in a USB-C **data** cable (some cables only charge; either way the band charges). The small CHRG light on the board shows that the charger is working, whatever the band's screen says. The band is switched on and off with its power button (see the confirm list in [docs/device-reference.md](docs/device-reference.md#facts-still-to-confirm-on-a-physical-band) for how long to press).
 
 Details, charge times and the parts still to be confirmed on hardware are in [docs/device-reference.md](docs/device-reference.md#power-charging-and-the-battery).
 
