@@ -45,6 +45,20 @@ class SettingsManager:
         "wifi_ssid":         "",
         "wifi_password":     "",
 
+        # First-join fallback (PROVISIONING.md section 2). wifi_joined_ok is
+        # False until the band has joined its network once; while False, a
+        # failed join clears the credentials and reboots into setup (AP) mode
+        # instead of retrying forever. Once True the creds are never dropped
+        # automatically, so a router that is off for hours is just waited out.
+        # /provision and the MENU+SELECT wipe set it back to False.
+        # last_wifi_error (wrong_password | no_ap_found | timeout) and
+        # last_ssid (the network that failed) are shown on the OLED and in
+        # GET /info while in setup mode. sta_join_timeout_s bounds the wait.
+        "wifi_joined_ok":    False,
+        "last_wifi_error":   "",
+        "last_ssid":         "",
+        "sta_join_timeout_s": 20,
+
         # Provisioning PSK. Per-device random 10-char string minted by
         # lib/provisioning.mint_psk() on first AP-mode entry and persisted
         # here. Out-of-band delivery via OLED line 4 per PROVISIONING.md
@@ -86,6 +100,14 @@ class SettingsManager:
         # New V4 subsystems
         "imu_enabled":       True,             # ICM-42688-P read in main loop
         "sd_logging":        False,            # local microSD session recording (off by default)
+        # RECORD mode (hold SELECT 2 s: Wi-Fi off, log to SD). It only starts
+        # when the SD card mounts; set False to disable the hold completely
+        # (e.g. units handed to people who never use the SD card).
+        "record_enabled":    True,
+        # Seconds on USB with no hub subscribed before the band switches
+        # itself to CHARGE (Wi-Fi off). 0 disables the automatic switch; hold
+        # MENU for 2 s to enter CHARGE by hand.
+        "auto_charge_idle_s": 300,
         "haptic_enabled":    False,            # IRLML2060 driver untested on V4, opt-in only
         "status_palette":    "default",        # named palette for the RGB status LED
 

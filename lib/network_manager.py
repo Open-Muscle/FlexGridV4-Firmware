@@ -24,6 +24,74 @@ import logger
 
 PROTOCOL_VERSION = "1.0"
 
+# Default seconds to wait for the first STA join before giving up. Settings key
+# "sta_join_timeout_s" overrides it; clamped so a typo cannot hang boot or
+# make the fallback fire before the radio has had a fair try.
+DEFAULT_JOIN_TIMEOUT_S = 20
+MIN_JOIN_TIMEOUT_S = 5
+MAX_JOIN_TIMEOUT_S = 60
+
+
+# ---------------------------------------------------------------------------
+# Join-result bookkeeping (PROVISIONING.md section 2: fall back to setup mode
+# when the very first Wi-Fi join fails). Kept as plain functions over the
+# settings dict so the rules are testable without a radio.
+#
+# Settings keys involved:
+#   wifi_joined_ok   True once this band has joined its network at least once
+#                    since the last /provision or Wi-Fi wipe. While False, a
+#                    failed join sends the band back to setup mode; once True
+#                    the creds are never discarded (the router may simply be
+#                    off, and the radio keeps retrying on its own).
+#   last_wifi_error  wrong_password | no_ap_found | timeout, or "" (shown on
+#                    the OLED and reported by GET /info in setup mode).
+#   last_ssid        the network that failed, kept for display / prefill.
+# ---------------------------------------------------------------------------
+
+def _stat(name, default):
+    """network.STAT_* constant, tolerant of builds that lack one."""
+    try:
+        return getattr(network, name)
+    except AttributeError:
+        return default
+
+
+def classify_join_status(code):
+    """Map a network.WLAN.status() code to a failure reason, or None if the
+    code is not a failure (idle, connecting, got-ip, unknown).
+
+    A WPA2 handshake timeout is what a wrong password looks like on some
+    access points, so it counts as wrong_password too."""
+    if code is None:
+        return None
+    if code in (_stat("STAT_WRONG_PASSWORD", 202), _stat("STAT_HANDSHAKE_TIMEOUT", 204)):
+        return "wrong_password"
+    if code == _stat("STAT_NO_AP_FOUND", 201):
+        return "no_ap_found"
+    return None
+
+
+def record_join_failure(settings, reason):
+    """Apply a failed first join to the settings dict: remember why, keep the
+    SSID for display, and clear the credentials so the next boot lands in AP
+    (setup) mode. The caller saves and resets."""
+    settings["last_wifi_error"] = reason or "timeout"
+    settings["last_ssid"] = settings.get("wifi_ssid") or settings.get("last_ssid") or ""
+    settings["wifi_ssid"] = ""
+    settings["wifi_password"] = ""
+    settings["wifi_joined_ok"] = False
+
+
+def record_join_success(settings):
+    """Mark the network as proven good. Returns True when something changed
+    (so the caller only writes flash when it has to)."""
+    changed = False
+    for key, value in (("wifi_joined_ok", True), ("last_wifi_error", ""), ("last_ssid", "")):
+        if settings.get(key) != value:
+            settings[key] = value
+            changed = True
+    return changed
+
 
 class NetworkManager:
     def __init__(self, settings, subscribers):
@@ -32,8 +100,12 @@ class NetworkManager:
 
         self.device_id = settings["device_id"]
         self.device_type = settings["device_type"]
-        self.ssid = settings.get("wifi_ssid", "").strip()
-        self.password = settings.get("wifi_password", "").strip()
+        # Not stripped: an SSID or password may legitimately start or end with
+        # a space, and provisioning stores them exactly as typed.
+        self.ssid = settings.get("wifi_ssid") or ""
+        self.password = settings.get("wifi_password") or ""
+        # Why the most recent connect() failed ("" when it did not).
+        self.last_error = ""
 
         self.sta = network.WLAN(network.STA_IF)
 
@@ -48,28 +120,53 @@ class NetworkManager:
         self._seq = 0
 
     async def connect(self):
-        """Bring the STA interface up and join the configured AP. Non-fatal
-        if it does not join within the timeout; the link layer will keep
-        trying in the background and send loops will pick up once it's up."""
+        """Bring the STA interface up and join the configured AP. Returns True
+        when joined, False when it did not join within sta_join_timeout_s
+        (self.last_error then says why: wrong_password / no_ap_found /
+        timeout). A False return is non-fatal here: the link layer keeps
+        trying in the background and send loops pick up once it is up. The
+        caller decides whether a failure on a never-joined network should
+        send the band back to setup mode (see record_join_failure)."""
+        self.last_error = ""
         if not self.ssid:
             logger.warn("No Wi-Fi SSID configured; skipping connection")
-            return
+            return False
 
         if not self.sta.active():
             self.sta.active(True)
 
         if not self.sta.isconnected():
+            timeout_s = self.settings.get("sta_join_timeout_s", DEFAULT_JOIN_TIMEOUT_S)
+            try:
+                timeout_s = int(timeout_s)
+            except (TypeError, ValueError):
+                timeout_s = DEFAULT_JOIN_TIMEOUT_S
+            timeout_s = max(MIN_JOIN_TIMEOUT_S, min(MAX_JOIN_TIMEOUT_S, timeout_s))
+
             logger.info("Connecting to Wi-Fi SSID='{}'".format(self.ssid))
             self.sta.connect(self.ssid, self.password)
-            for _ in range(20):
+            # The driver retries on its own, so status() flips between a
+            # failure code and "connecting"; remember the latest failure seen
+            # rather than sampling once at the deadline.
+            reason = None
+            for _ in range(timeout_s):
                 if self.sta.isconnected():
                     break
+                try:
+                    seen = classify_join_status(self.sta.status())
+                except Exception:
+                    seen = None
+                if seen:
+                    reason = seen
                 await asyncio.sleep(1)
             if not self.sta.isconnected():
-                logger.warn("Wi-Fi did not join within 20s; will keep trying")
-                return
+                self.last_error = reason or "timeout"
+                logger.warn("Wi-Fi did not join within {}s ({})".format(
+                    timeout_s, self.last_error))
+                return False
 
         logger.info("Wi-Fi connected, IP: " + self.sta.ifconfig()[0])
+        return True
 
     def rssi(self):
         try:
