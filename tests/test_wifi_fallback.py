@@ -157,6 +157,7 @@ class FallbackFlowTests(unittest.TestCase):
         self.addCleanup(os.chdir, self.cwd)
         flexgrid.machine.reset.reset_mock()
         self.display = mock.MagicMock()
+        self.display.rows = 4
         self.led = mock.MagicMock()
 
     def provisioned_settings(self, **extra):
@@ -189,17 +190,25 @@ class FallbackFlowTests(unittest.TestCase):
         self.assertFalse(on_disk["wifi_joined_ok"])
         # reason was put on the OLED before the reset
         shown = self.display.text_screen.call_args[0][0]
-        self.assertEqual(shown[0], "WIFI FAILED")
-        self.assertIn("check password", shown)
+        self.assertEqual(shown, ["WIFI FAILED", "check password", "back to setup"])
 
         # Next boot: empty wifi_ssid -> AP branch. Its screen and /info say why.
         again = SettingsManager.load()
         self.assertEqual(again["wifi_ssid"], "")
         lines = screens.setup_screen_lines("OM-flexgrid-abc123", again["provisioning_psk"],
                                            again["last_wifi_error"], again["last_ssid"])
-        self.assertIn("PSK kd3mpq72xy", lines)
-        self.assertIn("LAST TRY FAILED", lines)
-        self.assertIn("check password", lines)
+        self.assertIn("PW kd3mpq72xy", lines)
+        # a 4-line panel rotates its top row through the failure reason
+        frames = [screens.setup_screen_lines("OM-flexgrid-abc123", again["provisioning_psk"],
+                                             again["last_wifi_error"], again["last_ssid"], tick=t)[0]
+                  for t in range(6)]
+        self.assertIn("LAST TRY FAILED", frames)
+        self.assertIn("check password", frames)
+        # a taller panel shows everything at once
+        tall = screens.setup_screen_lines("OM-flexgrid-abc123", again["provisioning_psk"],
+                                          again["last_wifi_error"], again["last_ssid"], rows=8)
+        self.assertIn("LAST TRY FAILED", tall)
+        self.assertIn("check password", tall)
         state = provisioning._ProvisioningState(again, SettingsManager, {})
         info = state.info_payload()
         self.assertEqual(info["last_wifi_error"], "wrong_password")
@@ -276,7 +285,7 @@ class ScreenTests(unittest.TestCase):
 
     def test_ap_name_and_psk_never_truncated(self):
         lines = screens.setup_screen_lines("OM-flexgrid-d7af0b", "kd3mpq72xy", "", "")
-        self.assertEqual(lines, ["WIFI SETUP", "OM-flexgrid-", "d7af0b", "PSK kd3mpq72xy"])
+        self.assertEqual(lines, ["WIFI SETUP", "OM-flexgrid-", "d7af0b", "PW kd3mpq72xy"])
         self.assertEqual("".join(lines[1:3]), "OM-flexgrid-d7af0b")
 
     def test_short_ap_name_stays_on_one_line(self):

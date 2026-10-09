@@ -267,6 +267,8 @@ class _ProvisioningState:
             # drops back into setup mode. last_ssid is the network it tried.
             "last_wifi_error": self.settings.get("last_wifi_error") or "",
             "last_ssid":       self.settings.get("last_ssid") or "",
+            # left / right / labeler, or "" when no role has been assigned.
+            "role":            self.settings.get("role") or "",
         }
         # Optional device-type-specific fields (e.g. matrix dims for FlexGrid)
         for k, v in self.info_extras.items():

@@ -78,10 +78,20 @@ Same sequence, but no `config/settings.json` is pushed and none is needed in the
 WIFI SETUP
 OM-flexgrid-
 <6hex>
-PSK <10 chars>
+PW <10 chars>
 ```
 
+The network name is split over two lines (read them as one name). The top line rotates between `WIFI SETUP` and `see guide`; the name and password stay put. The LED blinks blue once a second. If instead it blinks blue twice and pauses, the OLED is not answering: check the display connector and the I2C scan (`python tools/kit_check.py <port>` prints it).
+
 A re-flash always changes the device id and the setup password, so a band you flashed before will appear as a new device.
+
+### Checking a band before it ships
+
+```bash
+python tools/kit_check.py COM8 --role left --label "Band A" --clear-logs
+```
+
+Reads the band over USB, fails with a readable reason when it is not in factory state, the OLED or battery is missing, or the firmware differs from this checkout, and on PASS prints the text for the band's sticker (device id, setup network, setup password). See "Pre-ship check" in README.md for the options.
 
 ### Clearing a used band without re-flashing
 
@@ -91,6 +101,10 @@ python wipe.py COM8 --reset  # same, then reboot it
 ```
 
 This deletes `config/settings.json`, `log.txt` and `log.txt.bak`. The firmware stays installed; the next boot starts at `WIFI SETUP` with a new device id and setup password. Do this before a band changes hands, because the settings hold the Wi-Fi password and the log can hold the network name.
+
+### What you should see after joining
+
+LED blue steady while joining, green steady for 2 s once joined, then the idle pulse. The OLED shows `WIFI OK` and the band's IP address for 15 s; tap MENU at any time to see it again (a second tap shows battery, mode and hubs, a third returns to the heatmap). Use that IP for "add by IP" in the PC app if automatic discovery does not find the band.
 
 ### After a normal (non-factory) flash
 
@@ -173,7 +187,7 @@ Holding SELECT for 2 seconds starts RECORD mode (SD logging, Wi-Fi off). It only
 
 ### Band disappeared from the app after sitting on USB
 
-CHARGE mode turns Wi-Fi off. It starts when you hold MENU for 2 seconds, or automatically after `auto_charge_idle_s` (default 300) seconds on USB with no hub connected. The OLED shows `CHARGE MODE / Wi-Fi is OFF`; tap SELECT or hold MENU 2 seconds to reboot back onto Wi-Fi.
+CHARGE mode turns Wi-Fi off. It starts when you hold MENU for 2 seconds, or automatically after `auto_charge_idle_s` (default 300) seconds on USB with no hub connected. The OLED shows `CHARGING / Wi-Fi off / unplug to resume / or tap SELECT`; unplug USB, tap SELECT or hold MENU 2 seconds to reboot back onto Wi-Fi.
 
 ## Running the desktop tests
 

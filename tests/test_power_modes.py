@@ -175,8 +175,9 @@ class ModeBannerTests(unittest.TestCase):
         self.assertEqual(env.state.power_mode, "charge")
         self.assertEqual(env.wifi_off_calls, [mock.call(False)])
         lines = env.screen()
-        self.assertEqual(lines[0], "CHARGE MODE")
-        self.assertIn("Wi-Fi is OFF", lines)
+        self.assertEqual(lines[0], "CHARGING")
+        self.assertIn("Wi-Fi off", lines)
+        self.assertIn("unplug to resume", lines)
 
     def test_stream_shows_heatmap(self):
         env = Env(FakeSD())
@@ -231,6 +232,11 @@ def SettingsManager_defaults():
 
 
 class DisplayLoopTests(unittest.TestCase):
+    def real_state(self):
+        subs = mock.MagicMock()
+        subs.count.return_value = 0
+        return flexgrid._DeviceState({"device_id": "flexgrid-abc123", "device_type": "flexgrid"}, subs)
+
     def run_display(self, state, seconds=0.45):
         display = mock.MagicMock()
         sm = mock.MagicMock()
@@ -247,8 +253,7 @@ class DisplayLoopTests(unittest.TestCase):
         return display
 
     def test_banner_is_drawn_once_not_every_frame(self):
-        state = mock.MagicMock()
-        state.notice = None
+        state = self.real_state()
         state.power_mode = "charge"
         display = self.run_display(state)
         self.assertEqual(display.text_screen.call_count, 1)
@@ -256,9 +261,7 @@ class DisplayLoopTests(unittest.TestCase):
         self.assertEqual(display.text_screen.call_args[0][0], screens.mode_lines("charge"))
 
     def test_stream_draws_the_heatmap(self):
-        state = mock.MagicMock()
-        state.notice = None
-        state.power_mode = "stream"
+        state = self.real_state()
         display = self.run_display(state)
         self.assertGreater(display.draw_sensor_matrix.call_count, 3)
         display.text_screen.assert_not_called()
