@@ -20,6 +20,10 @@
 #   status_led_loop       - RGB LED animation                (30 Hz)
 #   gc_loop               - periodic gc.collect()            (0.5 Hz)
 #
+# Setup mode (no Wi-Fi credentials) runs a smaller set: setup_led_loop (the
+# blue setup blink) and setup_screen_loop (network name + password on the
+# OLED) next to the provisioning HTTP server.
+#
 # The command server (lib/commands.py) listens on cmd_port and accepts hubs
 # via asyncio.start_server in its own background tasks.
 
@@ -96,6 +100,8 @@ device_status = {
     "rssi":             None,
     "imu":              None,   # populated when ICM-42688-P is present
     "subscribers":      0,      # current subscriber count
+    "ip":               "",     # LAN address once joined ("" until then)
+    "role":             "",     # left / right / labeler / "" (unassigned)
     "reset_cause":      None,
     "reset_cause_name": None,
 }
@@ -134,6 +140,57 @@ def _feed_wdt():
             _wdt.feed()
         except BaseException:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Status UX constants and pure helpers (testable off-device)
+# ---------------------------------------------------------------------------
+
+JOINED_LED_MS = 2000          # solid green after the Wi-Fi link comes up
+STATUS_HOLD_MS = 15000        # how long the status page stays up
+LOW_BATTERY_NOTICE_EVERY_MS = 300000   # re-show the LOW BATTERY notice
+LOW_BATTERY_V_DEFAULT = 3.55
+LOW_BATTERY_CLEAR_V = 0.10    # volts above the threshold before the flag clears
+LOW_BATTERY_MIN_V = 2.5       # below this the ADC reading is not a battery
+
+
+def display_height_from(settings):
+    """OLED height in pixels from settings: 64 for a 128x64 panel, else the
+    shipped 32."""
+    try:
+        h = int(settings.get("display_height", 32))
+    except (TypeError, ValueError):
+        return 32
+    return 64 if h == 64 else 32
+
+
+def update_low_battery(was_low, vbat, vbus, threshold=LOW_BATTERY_V_DEFAULT):
+    """Low-battery flag with hysteresis. Never low while USB is feeding the
+    band, and an implausible reading (nothing connected to the ADC) does not
+    count as an empty battery."""
+    if vbus or vbat is None or vbat < LOW_BATTERY_MIN_V:
+        return False
+    if was_low:
+        return vbat < threshold + LOW_BATTERY_CLEAR_V
+    return vbat < threshold
+
+
+def note_link(state, connected, ip, now_ms):
+    """Record a Wi-Fi link change on the device state. The moment the link
+    comes up starts the 2 s green LED confirmation; the first time in this
+    boot it also raises the status page so the IP address can be read.
+    Called every LED tick with the live link flag."""
+    was_up = state.link_up
+    state.link_up = bool(connected)
+    if not connected:
+        state.ip = ""
+        return
+    if not was_up:
+        state.ip = ip or ""
+        state.joined_until = time.ticks_add(now_ms, JOINED_LED_MS)
+        if not state.link_announced:
+            state.link_announced = True
+            state.show_status(0)
 
 
 # ---------------------------------------------------------------------------
@@ -202,9 +259,71 @@ class _DeviceState:
         # action (e.g. RECORD with no SD card) tells the user why nothing
         # happened. Set via show_notice().
         self.notice = None
+        # Wi-Fi bring-up and status UX (see note_link / _resolve_led_state).
+        #   joining        True from boot until the first join attempt ends
+        #   link_up        live Wi-Fi link flag, kept by note_link
+        #   ip             LAN address while link_up, else ""
+        #   joined_until   ticks_ms until which the LED shows solid green
+        #   join_failed    first join failed; band is about to reboot to setup
+        #   low_battery    battery under settings low_battery_v, USB absent
+        #   view_page      status page on the OLED (0, 1) or None = heatmap
+        self.ssid             = settings.get("wifi_ssid") or ""
+        self.joining          = True
+        self.link_up          = False
+        self.link_announced   = False
+        self.ip               = ""
+        self.joined_until     = None
+        self.join_failed      = False
+        self.low_battery      = False
+        self.low_notice_at    = None
+        self.view_page        = None
+        self.view_until       = 0
+        try:
+            self.low_battery_v = float(settings.get("low_battery_v", LOW_BATTERY_V_DEFAULT))
+        except (TypeError, ValueError):
+            self.low_battery_v = LOW_BATTERY_V_DEFAULT
+        self.display_rows     = screens.DEFAULT_ROWS
+        self.status_page_count = 2
 
     def show_notice(self, lines, hold_ms=3000):
         self.notice = (list(lines), time.ticks_add(time.ticks_ms(), hold_ms))
+
+    def show_status(self, page=0, hold_ms=STATUS_HOLD_MS):
+        """Put a status page (0 = network, 1 = device) on the OLED for
+        hold_ms, then fall back to the heatmap."""
+        self.view_page = page
+        self.view_until = time.ticks_add(time.ticks_ms(), hold_ms)
+
+    def tap_status(self):
+        """MENU tap: heatmap -> status page 0 -> page 1 -> heatmap."""
+        page = self.status_page_now(time.ticks_ms())
+        if page is None:
+            self.show_status(0)
+        elif page + 1 < self.status_page_count:
+            self.show_status(page + 1)
+        else:
+            self.view_page = None
+
+    def status_page_now(self, now_ms):
+        """The status page that should be on screen, or None."""
+        if self.view_page is None:
+            return None
+        if time.ticks_diff(self.view_until, now_ms) <= 0:
+            self.view_page = None
+            return None
+        return self.view_page
+
+    def update_battery(self, vbat, pct, vbus, now_ms, threshold=LOW_BATTERY_V_DEFAULT):
+        """Refresh the low-battery flag; raise the OLED notice when it first
+        trips and again every LOW_BATTERY_NOTICE_EVERY_MS while it stays."""
+        low = update_low_battery(self.low_battery, vbat, vbus, threshold)
+        if low and (self.low_notice_at is None
+                    or time.ticks_diff(now_ms, self.low_notice_at) >= 0):
+            self.show_notice(screens.low_battery_lines(vbat, pct, self.display_rows), 4000)
+            self.low_notice_at = time.ticks_add(now_ms, LOW_BATTERY_NOTICE_EVERY_MS)
+        if not low:
+            self.low_notice_at = None
+        self.low_battery = low
 
     def set_scan_interval(self, ms):
         self.scan_interval_ms = int(ms)
@@ -412,19 +531,50 @@ async def wdt_canary_loop(interval_s=5):
         await asyncio.sleep(interval_s)
 
 
+def _status_info(state):
+    """Collect what the status pages show (see screens.status_pages)."""
+    mode = getattr(state, "power_mode", "stream")
+    if mode in ("charge", "record"):
+        wifi = "off"          # the radio is switched off in these modes
+    elif state.link_up:
+        wifi = "ok"
+    elif state.joining:
+        wifi = "joining"
+    else:
+        wifi = "lost"
+    return {
+        "wifi":      wifi,
+        "ip":        state.ip,
+        "device_id": state.device_id,
+        "role":      state.role,
+        "vbat":      device_status.get("vbat"),
+        "pct":       device_status.get("pct"),
+        "low":       state.low_battery,
+        "mode":      mode,
+        "subs":      state.subscribers.count(),
+        "ssid":      state.ssid,
+    }
+
+
 def _screen_override(state):
     """Pure helper: the text lines that should replace the live heatmap right
-    now, or None to draw the heatmap. A transient notice wins; otherwise any
-    non-streaming power mode (PAUSED / CHARGE / RECORD) shows its banner so
-    the user can see why the band is not streaming and how to resume."""
+    now, or None to draw the heatmap. Priority: a transient notice, then the
+    status page (MENU tap, or the first 15 s after joining Wi-Fi), then any
+    non-streaming power mode (PAUSED / CHARGING / RECORDING) banner so the
+    user can see why the band is not streaming and how to resume."""
     if state is None:
         return None
+    rows = getattr(state, "display_rows", screens.DEFAULT_ROWS)
     notice = getattr(state, "notice", None)
     if notice is not None:
         if time.ticks_diff(notice[1], time.ticks_ms()) > 0:
             return notice[0]
         state.notice = None
-    return screens.mode_lines(getattr(state, "power_mode", "stream"))
+    page = state.status_page_now(time.ticks_ms()) if hasattr(state, "status_page_now") else None
+    if page is not None:
+        pages = screens.status_pages(_status_info(state), rows)
+        return pages[min(page, len(pages) - 1)]
+    return screens.mode_lines(getattr(state, "power_mode", "stream"), rows)
 
 
 async def display_loop(display, sensor_matrix, interval_ms=200, state=None):
@@ -476,6 +626,10 @@ async def status_loop(state, power, network, imu, interval_s=5):
     consumed by sensor_loop (attached as packet meta) and by status_led_loop
     (drives the connection-state palette).
 
+    Also keeps the LAN address, the role and the low-battery flag current:
+    `ip` and `role` ride in the status frame (and GET /info) so a hub can
+    show which band is which without a second request.
+
     Does NOT call imu.read() any more (board #0163 IMU-in-data work):
     imu_loop is the sole I2C reader and writes state.imu_cache. status_loop
     just snapshots imu.status_summary() to keep the meta.imu path populated
@@ -496,6 +650,12 @@ async def status_loop(state, power, network, imu, interval_s=5):
             device_status["rssi"]        = rssi
             device_status["imu"]         = imu_snap
             device_status["subscribers"] = state.subscribers.count()
+            device_status["role"]        = state.role
+            if network.is_connected():
+                state.ip = network.local_ip() or state.ip
+            device_status["ip"]          = state.ip
+            state.update_battery(v, p, power.is_vbus_present(), time.ticks_ms(),
+                                 state.low_battery_v)
 
             wifi = "WiFi:ok" if network.is_connected() else "WiFi:--"
             subs = state.subscribers.count()
@@ -527,31 +687,44 @@ async def subscriber_prune_loop(subscribers, interval_s=1):
 
 async def status_led_loop(state, status_led, network, power, interval_ms=33):
     """Drive the RGB LED state palette based on live device state. Runs at
-    ~30 Hz so breathe / blink animations look smooth.
+    ~30 Hz so breathe / blink animations look smooth. Started before the
+    Wi-Fi join so "joining" is visible, and it also watches the Wi-Fi link
+    (note_link) to time the green "joined" confirmation.
 
-    Resolution priority (highest wins, locked palette per board #0220):
+    Resolution priority (highest wins; the same list is the LED guide in the
+    README and is pinned by tests/test_status_ux.py):
 
         fault              -> in_fault set (recent WDT) -- RED fast blink
-        sleep              -> in_sleep set (gyro stillness in STREAM) -- WHITE dim breath
-        ap_provisioning    -> only reachable on the AP-mode boot branch
-        STANDBY            -> purple slow breath
-        CHARGE + full      -> solid cyan
-        CHARGE + charging  -> cyan slow pulse
-        STREAM + subs + USB-> orange solid + brief cyan flash every 5s
-        STREAM + subs      -> solid orange
+        hold previews      -> MENU+SELECT held: MAGENTA blink (release wipes
+                              Wi-Fi); MENU held: PURPLE pulse; SELECT held: GREEN breath
+        join_failed        -> AMBER fast blink, just before rebooting to setup
+        joined             -> GREEN solid for 2 s after the Wi-Fi link comes up
+        joining            -> BLUE solid while the first join runs
+        RECORD             -> GREEN 1 Hz breath
+        STANDBY            -> CYAN slow breath
+        CHARGE + full      -> solid PURPLE
+        CHARGE + charging  -> PURPLE slow pulse
+        low battery        -> AMBER 1 Hz blink (USB not plugged in)
+        Wi-Fi lost         -> AMBER slow pulse (the band keeps retrying)
+        STREAM + subs + USB-> ORANGE solid + brief cyan flash every 5s
+        STREAM + subs      -> solid ORANGE
         STREAM + idle      -> role-color brief pulse every 3s
                               (BLUE left, RED right, GREEN labeler, WHITE unassigned)
 
-    Wi-Fi-down is intentionally not surfaced -- the device degrading
-    Wi-Fi only matters while a hub is trying to use it, and Tory wants
-    the role-pulse to remain dominant when the device is sitting idle
-    on a desk. If the operator needs Wi-Fi diagnosis they read get_info
-    or watch the OLED, both of which are clearer than a blinking LED.
+    Setup mode (blue 1 Hz blink) is not in this list: it runs on the AP
+    branch of main() with setup_led_loop instead.
     """
     while True:
         try:
             now_ms = time.ticks_ms()
-            named = _resolve_led_state(state, power)
+            try:
+                connected = network.is_connected()
+                note_link(state, connected,
+                          network.local_ip() if connected and not state.link_up else None,
+                          now_ms)
+            except Exception as e:
+                logger.warn("note_link failed: {}".format(e))
+            named = _resolve_led_state(state, power, now_ms)
             status_led.set_state(named)
             status_led.animate(now_ms)
         except (asyncio.CancelledError, SystemExit):
@@ -561,15 +734,13 @@ async def status_led_loop(state, status_led, network, power, interval_ms=33):
         await asyncio.sleep_ms(interval_ms)
 
 
-def _resolve_led_state(state, power):
-    """Pure helper: map the current (power_mode, role, has_subs, vbus,
-    fault, sleep) tuple to one palette name. Kept side-effect-free so
-    the resolver logic is easy to unit-test off-device by feeding it a
-    fake state object."""
+def _resolve_led_state(state, power, now_ms=None):
+    """Pure helper: map the current device state to one palette name (the
+    priority list is in the status_led_loop docstring). Kept
+    side-effect-free so the resolver logic is easy to unit-test off-device by
+    feeding it a fake state object."""
     if getattr(state, "in_fault", False):
         return "fault"
-    if getattr(state, "in_sleep", False):
-        return "sleep"
     # Button-hold preview beats mode display: while BOOT is held past a
     # threshold the LED shows which action RELEASING now will trigger.
     hp = getattr(state, "hold_preview", None)
@@ -579,6 +750,16 @@ def _resolve_led_state(state, power):
         return "charging"          # purple pulse = release toggles charge
     if hp == "record":
         return "record"            # green breath = release toggles record
+    if getattr(state, "join_failed", False):
+        return "join_failed"
+    if now_ms is None:
+        now_ms = time.ticks_ms()
+    joined_until = getattr(state, "joined_until", None)
+    if joined_until is not None and time.ticks_diff(joined_until, now_ms) > 0:
+        return "joined"
+    link_up = getattr(state, "link_up", True)
+    if getattr(state, "joining", False) and not link_up:
+        return "joining"
     mode = getattr(state, "power_mode", "stream")
     if mode == "record":
         return "record"
@@ -586,11 +767,15 @@ def _resolve_led_state(state, power):
         return "standby"
     if mode == "charge":
         return "charge_full" if power.is_battery_full() else "charging"
+    vbus = power.is_vbus_present()
+    if getattr(state, "low_battery", False) and not vbus:
+        return "low_battery"
+    if not link_up:
+        return "wifi_lost"
     # STREAM. Treat a hub-paused state (subs > 0 but state.streaming
     # is False because a hub called stop_stream) as idle, so the LED
     # does not lie about whether data is flowing.
     has_active_subs = state.subscribers.count() > 0 and state.streaming
-    vbus = power.is_vbus_present()
     if has_active_subs:
         return "streaming_on_usb" if vbus else "streaming"
     # Idle: role-coded
@@ -633,6 +818,10 @@ async def power_mode_loop(state, power, select_pin, settings,
     to EN = hardware reset, NOT a readable GPIO, so it can only reset
     the chip and carries no firmware action):
 
+      MENU tap              -> status page on the OLED (Wi-Fi, IP address,
+                               device id, role; then battery, mode, hubs);
+                               each tap shows the next page, the last tap
+                               returns to the heatmap; pages time out after 15 s
       MENU held 2 s        -> toggle CHARGE mode
       SELECT tap            -> toggle STANDBY <-> STREAM
       SELECT held 2 s       -> toggle RECORD (Wi-Fi off + SD logging;
@@ -758,7 +947,9 @@ async def power_mode_loop(state, power, select_pin, settings,
     chord_latched = False
     sel_held_ticks = 0
     sel_latched = False
+    chord_wait = False
     last_select_ms = 0
+    last_menu_ms = 0
     charge_hold_ticks = max(1, (charge_hold_s * 1000) // tick_ms)   # 2 s
     record_hold_ticks = charge_hold_ticks                          # SELECT hold 2 s
     chord_hold_ticks = max(1, (3 * 1000) // tick_ms)                # 3 s
@@ -792,8 +983,19 @@ async def power_mode_loop(state, power, select_pin, settings,
             else:
                 if chord_held_ticks:
                     state.hold_preview = None
+                    # The chord was let go before 3 s. Ignore whichever
+                    # finger is still down until both are up, so letting go
+                    # of one button first does not count as a tap or a hold
+                    # of the other.
+                    chord_wait = True
                 chord_held_ticks = 0
                 chord_latched = False
+                if chord_wait:
+                    if not menu_down and not sel_down:
+                        chord_wait = False
+                    else:
+                        menu_down = False
+                        sel_down = False
 
                 # B) MENU held 2 s -> toggle CHARGE (one-shot per hold).
                 if menu_down:
@@ -812,6 +1014,13 @@ async def power_mode_loop(state, power, select_pin, settings,
                 else:
                     if menu_held_ticks:
                         state.hold_preview = None
+                    # Short MENU tap on release -> status page (the 2 s hold
+                    # above is the CHARGE toggle and does not also tap).
+                    if (menu_held_ticks and not menu_latched
+                            and menu_held_ticks < charge_hold_ticks
+                            and time.ticks_diff(now_ms, last_menu_ms) > DEBOUNCE_MS):
+                        last_menu_ms = now_ms
+                        state.tap_status()
                     menu_held_ticks = 0
                     menu_latched = False
 
@@ -967,14 +1176,17 @@ async def reboot_watcher(state):
 # First-join fallback (PROVISIONING.md section 2)
 # ---------------------------------------------------------------------------
 
-async def _fall_back_to_setup(settings, display, status_led, reason, hold_s=2):
+async def _fall_back_to_setup(settings, display, status_led, reason, hold_s=2, state=None):
     """The very first Wi-Fi join after provisioning failed (wrong password,
     5 GHz-only network, out of range). Forget the credentials, remember why
     (last_wifi_error) and which network (last_ssid), then reboot: with no
     wifi_ssid the next boot lands in the AP branch of main(), which shows
     the same SSID and PSK plus the reason on the OLED. Returns False without
     resetting if the settings could not be saved (so a flash fault cannot
-    cause a reset loop); on success machine.reset() does not return."""
+    cause a reset loop); on success machine.reset() does not return.
+
+    With `state`, the amber "join failed" blink goes through the LED
+    animator that is already running; without it the LED is set directly."""
     keys = ("wifi_ssid", "wifi_password", "wifi_joined_ok", "last_wifi_error", "last_ssid")
     backup = {k: settings.get(k) for k in keys}
     tried = settings.get("wifi_ssid") or ""
@@ -986,8 +1198,12 @@ async def _fall_back_to_setup(settings, display, status_led, reason, hold_s=2):
         return False
     logger.warn("First Wi-Fi join failed ({}); creds cleared, rebooting into setup mode".format(reason))
     try:
-        display.text_screen(screens.join_failed_lines(reason, tried))
-        status_led.set_rgb(200, 80, 0)   # amber while the reason is on screen
+        display.text_screen(screens.join_failed_lines(
+            reason, tried, getattr(display, "rows", screens.DEFAULT_ROWS)))
+        if state is not None:
+            state.join_failed = True     # status_led_loop shows the amber blink
+        else:
+            status_led.set_rgb(200, 80, 0)   # amber while the reason is on screen
     except Exception as e:
         logger.warn("Wi-Fi fallback screen failed: {}".format(e))
     await asyncio.sleep(hold_s)
@@ -995,7 +1211,7 @@ async def _fall_back_to_setup(settings, display, status_led, reason, hold_s=2):
     return True
 
 
-async def _handle_join_result(joined, network, settings, display, status_led):
+async def _handle_join_result(joined, network, settings, display, status_led, state=None):
     """Decide what a finished network.connect() means. Returns True when the
     band is resetting into setup mode (the caller should stop booting)."""
     if joined:
@@ -1007,8 +1223,54 @@ async def _handle_join_result(joined, network, settings, display, status_led):
     if network.last_error and not settings.get("wifi_joined_ok"):
         # Never joined this network. Go back to setup mode so the user can
         # fix the password / pick a 2.4 GHz network, instead of looping forever.
-        return await _fall_back_to_setup(settings, display, status_led, network.last_error)
+        return await _fall_back_to_setup(settings, display, status_led,
+                                         network.last_error, state=state)
     return False
+
+
+# ---------------------------------------------------------------------------
+# Setup mode (no Wi-Fi credentials): LED + OLED while the HTTP server waits
+# ---------------------------------------------------------------------------
+
+async def setup_led_loop(status_led, name, interval_ms=33):
+    """Animate one named palette state for as long as the band stays in setup
+    mode (blue 1 Hz blink, or the blue double blink when the OLED is not
+    answering)."""
+    status_led.set_state(name)
+    while True:
+        try:
+            status_led.animate(time.ticks_ms())
+        except (asyncio.CancelledError, SystemExit):
+            raise
+        except BaseException as e:
+            logger.warn("setup_led_loop failed: {} ({})".format(type(e).__name__, e))
+        await asyncio.sleep_ms(interval_ms)
+
+
+async def setup_screen_loop(display, ap_ssid, psk, last_error="", last_ssid="",
+                            frame_s=None):
+    """Redraw the setup screen when its content changes. On a 4-line panel
+    the top row rotates (WIFI SETUP / see guide / failure reason) while the
+    network name and password stay put; on a taller panel nothing rotates and
+    this just draws once."""
+    if frame_s is None:
+        frame_s = screens.SETUP_FRAME_S
+    tick = 0
+    last = None
+    while True:
+        try:
+            lines = screens.setup_screen_lines(
+                ap_ssid, psk, last_error, last_ssid,
+                getattr(display, "rows", screens.DEFAULT_ROWS), tick)
+            if lines != last:
+                display.text_screen(lines)
+                last = lines
+        except (asyncio.CancelledError, SystemExit):
+            raise
+        except BaseException as e:
+            logger.warn("setup_screen_loop failed: {} ({})".format(type(e).__name__, e))
+        tick += 1
+        await asyncio.sleep(frame_s)
 
 
 # ---------------------------------------------------------------------------
@@ -1067,25 +1329,30 @@ async def main():
     if not (settings.get("wifi_ssid") or "").strip():
         logger.info("Unprovisioned (wifi_ssid empty); entering AP mode")
         # Minimal subsystems for the AP path: display (to print SSID + PSK
-        # on the OLED) and status LED (solid blue for setup mode).
-        display    = DisplayManager()
+        # on the OLED) and status LED (blue blink for setup mode; a double
+        # blink instead when the OLED did not answer, because then nobody can
+        # read the password and the LED is the only sign of life).
+        display    = DisplayManager(height=display_height_from(settings))
         status_led = StatusLed()
-        status_led.set_rgb(0, 0, 255)
+        if not display.present:
+            logger.error("Setup mode but the OLED is not answering; LED shows the no-display pattern")
+        led_name = "setup" if display.present else "setup_no_oled"
+        asyncio.create_task(setup_led_loop(status_led, led_name))
 
         # Bring the AP up FIRST so we know the PSK (provisioning.run mints it
         # if missing), then paint the OLED with the final SSID + PSK.
         psk = provisioning.start_ap(
             settings, settings["device_type"], settings["device_id"])
         SettingsManager.save(settings)
-        display.text_screen(screens.setup_screen_lines(
-            provisioning.ssid_for(settings["device_type"], settings["device_id"]),
-            psk,
-            settings.get("last_wifi_error") or "",
-            settings.get("last_ssid") or ""))
+        ap_ssid = provisioning.ssid_for(settings["device_type"], settings["device_id"])
+        last_error = settings.get("last_wifi_error") or ""
+        last_ssid = settings.get("last_ssid") or ""
+        asyncio.create_task(setup_screen_loop(display, ap_ssid, psk, last_error, last_ssid))
 
         info_extras = {
             "caps":   ["sensor", "status", "cmd", "imu"],
             "matrix": [15, 4],
+            "oled":   display.present,
         }
         # serve() blocks until /provision lands, then soft_resets. Since
         # start_ap was already called, we drive serve() directly rather than
@@ -1103,7 +1370,7 @@ async def main():
     # vbus_stat_pin: None on as-built V4 (GPIO39 unwired, floats);
     # set to 39 in settings.json on V4.2+ hardware only.
     power         = PowerManager(vbus_pin=settings.get("vbus_stat_pin"))
-    display       = DisplayManager()
+    display       = DisplayManager(height=display_height_from(settings))
     sensor_matrix = SensorMatrix()
     network       = NetworkManager(settings, subscribers)
     menu          = MenuManager(display, network, power)
@@ -1119,6 +1386,8 @@ async def main():
 
     # DeviceState carries the live mutable state command handlers may mutate.
     state = _DeviceState(settings, subscribers)
+    state.display_rows = display.rows
+    state.status_page_count = 2 if display.rows < 8 else 1
     # Cache the IMU scale once on _DeviceState so announce + get_info pick
     # it up without each having to ask the imu instance. Stays None on
     # boards where the IMU isn't present, which keeps the field optional.
@@ -1162,20 +1431,21 @@ async def main():
                 return 1
         menu_pin = _NoPin3()
 
-    display.text_screen([
-        "OpenMuscle",
-        "FlexGrid V4",
-        settings["device_id"],
-        "BAT {:.2f}V".format(power.battery_voltage()),
-        "Joining Wi-Fi...",
-    ])
+    display.text_screen(screens.boot_lines(settings["device_id"], settings.get("wifi_ssid") or "",
+                                           display.rows))
+
+    # The LED animator starts BEFORE the join so "joining" (blue solid) is
+    # visible while network.connect() waits, then the green "joined" flash
+    # and the idle pulse follow without a gap.
+    asyncio.create_task(status_led_loop(state, status_led, network, power))
 
     joined = False
     try:
         joined = await network.connect()
     except Exception as e:
         logger.error("Network: {}".format(e))
-    if await _handle_join_result(joined, network, settings, display, status_led):
+    state.joining = False
+    if await _handle_join_result(joined, network, settings, display, status_led, state):
         return
 
     # Discovery: announce ourselves to the network. Best-effort mDNS plus a
@@ -1230,7 +1500,6 @@ async def main():
     # full beacon interval" case. See PROTOCOL.md section 5.5.
     asyncio.create_task(discovery.discover_listener_loop())
     asyncio.create_task(subscriber_prune_loop(subscribers))
-    asyncio.create_task(status_led_loop(state, status_led, network, power))
     # Power-mode state machine + SELECT-button cycle (board #0220).
     # Drives STREAM/STANDBY/CHARGE transitions, auto-CHARGE on USB+idle,
     # and refreshes VBUS-present + battery-full bits the LED resolver
@@ -1256,7 +1525,8 @@ async def main():
     if sta_ip:
         sta_state = provisioning._ProvisioningState(
             settings, SettingsManager,
-            info_extras={"caps": state.caps, "matrix": list(state.matrix_dims)},
+            info_extras={"caps": state.caps, "matrix": list(state.matrix_dims),
+                         "ip": sta_ip, "oled": display.present},
             state="provisioned")
         asyncio.create_task(provisioning.serve(sta_state, bind_ip=sta_ip))
     else:

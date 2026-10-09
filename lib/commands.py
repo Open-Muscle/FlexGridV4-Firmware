@@ -251,6 +251,11 @@ def build_handlers(device_state):
         pm = getattr(device_state, "power_mode", None)
         if pm:
             reply["power_mode"] = pm
+        # LAN address of the band, so a hub can show it (and add the band by
+        # IP) without a network scan. Omitted until the band has joined.
+        ip = getattr(device_state, "ip", "") or ""
+        if ip:
+            reply["ip"] = ip
         return reply
 
     async def set_scan_rate(data, peer):

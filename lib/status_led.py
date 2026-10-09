@@ -13,32 +13,45 @@
 #
 # The state palette maps named device states to RGB tuples + animation hints.
 # The main loop calls status_led.set_state(name) and the LED reflects it.
-# Animations (breathe, blink) are driven by a coroutine in flexgrid.py.
+# Animations (breathe, blink) are driven by a coroutine in flexgrid.py
+# (status_led_loop on a normal boot, setup_led_loop in setup mode).
 
 from machine import Pin, PWM
 import pinmap
 
 
-# 8-bit color tuples (0-255 per channel) per named state.
+# 8-bit color tuples (0-255 per channel) per named state, plus the animation.
 #
-# Palette discipline (board #0220 alignment with Tory's locked palette,
-# 2026-06-30; CHARGE recolored purple per Tory 2026-07-02): no two
-# distinct modes share an identical hue+pattern. Pattern carries the
-# disambiguator where hues are reused:
-#   PURPLE pulse vs PURPLE solid = charging vs full
-#   RED pulse    vs RED blink    = right-role idle vs fault
-# The idle hue ENCODES THE ROLE (blue=left, red=right, green=labeler,
-# white=unassigned); active modes use mode-coded hues (orange=streaming,
-# cyan=USB, purple=standby, magenta=provisioning, white-dim=sleep).
-# The state names below are stable; flexgrid.py picks the right one
-# from the current (power_mode, has_subscribers, vbus, role, fault,
-# sleep) tuple every animator tick.
+# One table, no overlaps: the full list is in README.md ("LED guide"). Rules
+# the palette follows:
+#   * Every distinct state differs in hue OR pattern from every other state
+#     that can be on at the same time.
+#   * Start-up reads blue to green: setup = blue 1 Hz blink, joining = blue
+#     solid, joined = green solid for 2 s, first join failed = amber fast
+#     blink (then back to setup).
+#   * Idle (no hub subscribed) is a brief role-coded pulse every 3 s:
+#     BLUE left, RED right, GREEN labeler, WHITE unassigned.
+#   * Streaming is ORANGE (solid), with a cyan flash on USB.
+#   * Modes the user picked have their own hue: STANDBY cyan breath,
+#     RECORD green breath, CHARGE purple (pulse while charging, solid when full).
+#   * Trouble is red (fault) or amber (Wi-Fi lost, low battery, join failed);
+#     amber states differ by pattern.
+# The state names below are stable; flexgrid.py (_resolve_led_state) picks
+# one from the current device state every animator tick.
 PALETTE_DEFAULT = {
-    # --- Boot / system overlays ---
-    "boot":             (0,   0,   200, "breathe"),     # blue slow breathe while booting / Wi-Fi connecting
+    # --- Boot and Wi-Fi bring-up (shown only while the band starts up) ---
+    "boot":             (0,   0,   200, "breathe"),     # blue breathe for the instant before the animator runs
+    "setup":            (0,   0,   255, "blink_slow"),  # blue 1 Hz blink = setup mode, read the OLED
+    "setup_no_oled":    (0,   0,   255, "blink_double"), # blue double blink = setup mode but the OLED is not answering
+    "joining":          (0,   0,   200, "solid"),       # blue solid = joining your Wi-Fi
+    "joined":           (0,   200, 0,   "solid"),       # green solid for 2 s = joined, then the normal idle pulse
+    "join_failed":      (200, 80,  0,   "blink_fast"),  # amber fast blink = first join failed, going back to setup
+    # --- Trouble ---
     "fault":            (255, 0,   0,   "blink_fast"),  # red fast blink, e.g. recent WDT-reset
-    "ap_provisioning":  (200, 0,   200, "blink_slow"),  # magenta 1 Hz blink during AP-mode provisioning
-    "sleep":            (40,  40,  40,  "breathe_slow"), # very-dim white slow breathe (gyro stillness)
+    "wifi_lost":        (200, 80,  0,   "pulse_1500"),  # amber slow pulse = Wi-Fi dropped, still retrying
+    "low_battery":      (200, 80,  0,   "blink_slow"),  # amber 1 Hz blink = battery low, plug in USB
+    # --- Button-hold preview (release now to wipe Wi-Fi) ---
+    "ap_provisioning":  (200, 0,   200, "blink_slow"),  # magenta 1 Hz blink = releasing now wipes Wi-Fi
     # --- STREAM mode, idle (no subscribers): hue encodes role ---
     "idle_left":        (0,   0,   200, "pulse_3s"),    # brief blue pulse every 3s
     "idle_right":       (200, 0,   0,   "pulse_3s"),    # brief red pulse every 3s
@@ -51,13 +64,11 @@ PALETTE_DEFAULT = {
     "standby":          (0,   140, 200, "breathe_slow"), # slow cyan breath, 3 s period
     # --- RECORD (SD logging, unsupervised; Wi-Fi off) ---
     "record":           (0,   200, 0,   "breathe"),      # green 1 Hz breath = capturing to SD
-    # --- CHARGE mode (PURPLE per Tory 2026-07-02: "band turn purple") ---
+    # --- CHARGE mode (purple) ---
     "charging":         (120, 0,   180, "pulse_1500"),  # slow purple pulse, 1.5 s period
     "charge_full":      (120, 0,   180, "solid"),       # solid purple = battery full
     # --- Legacy palette entries kept so existing callers do not break.
-    # Slowly migrate them to the new names above and then drop these.
     "idle":             (32,  32,  32,  "solid"),
-    "wifi_lost":        (200, 80,  0,   "blink_fast"),
     "error":            (255, 0,   0,   "blink_fast"),
     "calibrating":      (0,   200, 200, "breathe"),
 }
@@ -107,7 +118,8 @@ class StatusLed:
         """Public direct RGB write (0..255 per channel). For callers that
         need a fixed color outside the named-state palette, e.g. the
         provisioning AP-mode indicator. Bypasses the animator; the next
-        set_state() call will overwrite it."""
+        set_state() call will overwrite it. (An animator loop that is still
+        running overwrites it on its next tick, so set a named state there.)"""
         self._set_rgb(r, g, b)
 
     def animate(self, t_ms):
@@ -128,7 +140,7 @@ class StatusLed:
             return
         if mode == "breathe_slow":
             # 0.33 Hz triangle wave: 0 -> 1 -> 0 over 3000 ms. Used for
-            # standby (purple) and sleep (very-dim white).
+            # standby (cyan).
             phase = (t_ms % 3000) / 1500.0
             if phase > 1.0:
                 phase = 2.0 - phase
@@ -145,6 +157,17 @@ class StatusLed:
             return
         if mode == "blink_slow":
             on = (t_ms // 500) % 2 == 0
+            if on:
+                self._set_rgb(r0, g0, b0)
+            else:
+                self._set_rgb(0, 0, 0)
+            return
+        if mode == "blink_double":
+            # Two short flashes then a pause, 1.5 s period: the pattern for
+            # "setup mode but no OLED answered", so it cannot be mistaken for
+            # the plain 1 Hz setup blink.
+            t_in = t_ms % 1500
+            on = t_in < 120 or 240 <= t_in < 360
             if on:
                 self._set_rgb(r0, g0, b0)
             else:

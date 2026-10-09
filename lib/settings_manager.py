@@ -111,8 +111,15 @@ class SettingsManager:
         "haptic_enabled":    False,            # IRLML2060 driver untested on V4, opt-in only
         "status_palette":    "default",        # named palette for the RGB status LED
 
-        # Display
+        # Display. The shipped OLED is 128x32 (4 text lines). Set
+        # display_height to 64 only for a 128x64 panel; any other value is
+        # treated as 32.
         "display_brightness": 255,
+        "display_height":    32,
+
+        # Battery volts under which the LED blinks amber and the OLED says
+        # LOW BATTERY (only when USB is not plugged in).
+        "low_battery_v":     3.55,
     }
 
     @staticmethod

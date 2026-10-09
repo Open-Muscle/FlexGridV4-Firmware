@@ -1,5 +1,7 @@
 # lib/display_manager.py
-# SSD1306 128x64 OLED over I2C on the V3 rigid PCB.
+# SSD1306 OLED over I2C. The shipped panel is 128x32 (4 text rows of 16
+# characters, a 15x4 heatmap at 8 px per cell). A 128x64 panel works too; pass
+# height=64 (settings key "display_height") and the text screens get 8 rows.
 
 import ssd1306
 from machine import Pin, I2C
@@ -8,10 +10,11 @@ import logger
 
 
 class DisplayManager:
-    def __init__(self, width=128, height=64, i2c_freq=400000, i2c_addr=0x3C):
+    def __init__(self, width=128, height=32, i2c_freq=400000, i2c_addr=0x3C):
         self.oled = None
         self.width = width
         self.height = height
+        self.rows = max(1, height // 8)      # text rows of 8 px
         try:
             self.i2c = I2C(0, scl=Pin(pinmap.I2C_SCL), sda=Pin(pinmap.I2C_SDA),
                            freq=i2c_freq)
@@ -24,6 +27,13 @@ class DisplayManager:
             logger.info(f"SSD1306 {width}x{height} initialized")
         except Exception as e:
             logger.error(f"SSD1306 init failed: {e}. Display disabled.")
+
+    @property
+    def present(self):
+        """True when the OLED answered at init. False means nobody can read
+        the screen, so the setup password cannot be shown (the status LED
+        then uses its own no-display pattern)."""
+        return self.oled is not None
 
     def clear(self):
         if not self.oled:
@@ -38,7 +48,7 @@ class DisplayManager:
         self.oled.fill(0)
         cols = len(matrix)
         rows = len(matrix[0]) if cols else 0
-        cell = 8                                 # 15 * 8 = 120 px wide, 4 * 8 = 32 px tall
+        cell = 8                                 # 15 * 8 = 120 px wide, 4 * 8 = 32 px tall (fills a 128x32 panel)
         x_off = max(0, (self.width - cols * cell) // 2)
         y_off = max(0, (self.height - rows * cell) // 2)
         for c in range(cols):
@@ -59,7 +69,7 @@ class DisplayManager:
         self.oled.show()
 
     def update(self, state):
-        """Render menu / status. 128x64 = 8 lines of 8px text, 16 chars each."""
+        """Render menu / status: `rows` lines of 8px text, 16 chars each."""
         if not self.oled:
             return
         self.oled.fill(0)
@@ -69,7 +79,7 @@ class DisplayManager:
             self.oled.text(f"{mode}"[:16], 0, line * 8)
             line += 1
         for idx, item in enumerate(state.get('menu_items', [])):
-            if line >= 8:
+            if line >= self.rows:
                 break
             prefix = '>' if idx == state.get('current_selection', 0) else ' '
             self.oled.text(f"{prefix}{item}"[:16], 0, line * 8)
@@ -77,10 +87,12 @@ class DisplayManager:
         self.oled.show()
 
     def text_screen(self, lines):
-        """Show up to 8 lines of plain text (debug/status helper)."""
+        """Show plain text, one line per 8 px row, 16 characters per line.
+        Lines beyond the panel height are dropped, so callers build their
+        text for `rows` (see lib/screens.py)."""
         if not self.oled:
             return
         self.oled.fill(0)
-        for i, ln in enumerate(lines[:8]):
+        for i, ln in enumerate(lines[:self.rows]):
             self.oled.text(str(ln)[:16], 0, i * 8)
         self.oled.show()
