@@ -36,7 +36,7 @@ from settings_manager import SettingsManager
 from sensor_matrix    import SensorMatrix
 from display_manager  import DisplayManager
 from menu_manager     import MenuManager
-from network_manager  import NetworkManager
+from network_manager  import NetworkManager, record_join_failure, record_join_success
 from power_manager    import PowerManager
 from status_led       import StatusLed
 from subscribers      import Subscribers
@@ -45,6 +45,7 @@ from commands         import CommandServer, build_handlers
 from imu              import IMU
 from sd_logger        import SDLogger
 import provisioning
+import screens
 
 
 # Reset-cause names, built from the named machine.* constants instead of
@@ -196,6 +197,14 @@ class _DeviceState:
         # set_power_mode cmd verb; applied by power_mode_loop within a
         # tick so the ack flushes before the radio drops.
         self.requested_power_mode = None
+        # Transient OLED message: (lines, until_ticks_ms) or None. While it
+        # is live display_loop shows it instead of the heatmap, so a refused
+        # action (e.g. RECORD with no SD card) tells the user why nothing
+        # happened. Set via show_notice().
+        self.notice = None
+
+    def show_notice(self, lines, hold_ms=3000):
+        self.notice = (list(lines), time.ticks_add(time.ticks_ms(), hold_ms))
 
     def set_scan_interval(self, ms):
         self.scan_interval_ms = int(ms)
@@ -403,8 +412,27 @@ async def wdt_canary_loop(interval_s=5):
         await asyncio.sleep(interval_s)
 
 
-async def display_loop(display, sensor_matrix, interval_ms=200):
+def _screen_override(state):
+    """Pure helper: the text lines that should replace the live heatmap right
+    now, or None to draw the heatmap. A transient notice wins; otherwise any
+    non-streaming power mode (PAUSED / CHARGE / RECORD) shows its banner so
+    the user can see why the band is not streaming and how to resume."""
+    if state is None:
+        return None
+    notice = getattr(state, "notice", None)
+    if notice is not None:
+        if time.ticks_diff(notice[1], time.ticks_ms()) > 0:
+            return notice[0]
+        state.notice = None
+    return screens.mode_lines(getattr(state, "power_mode", "stream"))
+
+
+async def display_loop(display, sensor_matrix, interval_ms=200, state=None):
     """Render at ~5 Hz independent of scan rate.
+
+    With `state` given, notices and the PAUSED / CHARGE / RECORD banners
+    (see _screen_override) replace the heatmap; text is drawn only when it
+    changes, so a banner costs one I2C frame instead of five per second.
 
     Was 66 ms (~15 Hz). Bumped to 200 ms during the 60Hz profile work
     (#0179) because the SSD1306 I2C frame takes ~22 ms, so at 66 ms
@@ -414,9 +442,16 @@ async def display_loop(display, sensor_matrix, interval_ms=200):
     hurting the live-readout UX. Easy to revert by passing
     interval_ms=66 at the call site.
     """
+    last_text = None
     while True:
         try:
-            display.draw_sensor_matrix(sensor_matrix.matrix)
+            lines = _screen_override(state)
+            if lines is None:
+                last_text = None
+                display.draw_sensor_matrix(sensor_matrix.matrix)
+            elif lines != last_text:
+                display.text_screen(lines)
+                last_text = lines
         except (asyncio.CancelledError, SystemExit):
             raise
         except BaseException as e:
@@ -572,7 +607,7 @@ async def power_mode_loop(state, power, select_pin, settings,
                           network=None,
                           sd=None,
                           tick_ms=100,
-                          auto_charge_idle_s=30,
+                          auto_charge_idle_s=None,
                           fault_clear_s=60,
                           charge_hold_s=2):
     """Drive the STREAM/STANDBY/CHARGE state machine + SELECT button cycle.
@@ -583,7 +618,10 @@ async def power_mode_loop(state, power, select_pin, settings,
       - Every 10 ticks (1 s) update power.update_vbus_state() so the
         LED resolver sees fresh VBUS + battery-full bits.
       - Auto-enter CHARGE: when power_mode==stream + USB present +
-        idle (no subscribers) for auto_charge_idle_s seconds.
+        idle (no subscribers) for auto_charge_idle_s seconds (settings
+        "auto_charge_idle_s", default 300; 0 = never). CHARGE turns Wi-Fi
+        off, so the delay is long enough that a band plugged in for power
+        while the hub is still being set up does not vanish from the app.
       - Auto-exit CHARGE: when USB unplugs while in CHARGE, drop
         straight back to STREAM (the user's expected default).
       - Clear in_fault after fault_clear_s of clean runtime so the
@@ -598,7 +636,10 @@ async def power_mode_loop(state, power, select_pin, settings,
       MENU held 2 s        -> toggle CHARGE mode
       SELECT tap            -> toggle STANDBY <-> STREAM
       SELECT held 2 s       -> toggle RECORD (Wi-Fi off + SD logging;
-                               unsupervised ML capture)
+                               unsupervised ML capture). Refused, with
+                               Wi-Fi left on and an OLED note, when the SD
+                               card does not mount or settings
+                               "record_enabled" is false.
       (in CHARGE/RECORD) a  -> SELECT tap or hold leaves the mode
                                (reboots for clean Wi-Fi; RECORD closes
                                the SD session first)
@@ -615,8 +656,13 @@ async def power_mode_loop(state, power, select_pin, settings,
     and it never came back onto Wi-Fi" symptom). A reboot always lands
     in STREAM with Wi-Fi up, which for a charging device is fine.
 
+    The OLED shows a banner in every non-streaming mode (see
+    screens.mode_lines), drawn by display_loop from state.power_mode.
+
     Hardened with SystemExit/CancelledError re-raise + BaseException
     catch matching the rest of the V4 loops (board #0166)."""
+    if auto_charge_idle_s is None:
+        auto_charge_idle_s = settings.get("auto_charge_idle_s", 300)
 
     def _enter_charge(reason):
         state.power_mode = "charge"
@@ -644,6 +690,9 @@ async def power_mode_loop(state, power, select_pin, settings,
         try:
             settings["wifi_ssid"] = ""
             settings["wifi_password"] = ""
+            settings["wifi_joined_ok"] = False
+            settings["last_wifi_error"] = ""
+            settings["last_ssid"] = ""
             SettingsManager.save(settings)
         except Exception as e:
             logger.error("Cred wipe failed; NOT rebooting: {}".format(e))
@@ -655,8 +704,30 @@ async def power_mode_loop(state, power, select_pin, settings,
         # full speed (240 MHz -- SD writes + scan need it), SD session open.
         # sensor_loop writes each frame (matrix + labels + IMU) while
         # sd.is_recording(). Green breathing LED.
+        #
+        # Entering RECORD cuts Wi-Fi, so it is refused (nothing changes, Wi-Fi
+        # stays up and streaming) unless the SD session is already open: with
+        # no card the old order dropped Wi-Fi first and then captured nothing,
+        # which looked like the band had died.
+        if not settings.get("record_enabled", True):
+            logger.info("RECORD requested ({}) but record_enabled is false; ignoring".format(reason))
+            state.show_notice(["RECORD OFF", "disabled in", "settings"])
+            return
         if sd is None:
             logger.warn("record requested but no SD logger; ignoring")
+            state.show_notice(["NO SD CARD", "Record needs one", "Wi-Fi stays on"])
+            return
+        was_enabled = sd.enabled
+        sd.force_enable()
+        opened = False
+        try:
+            opened = bool(sd.mount() and sd.start_session())
+        except Exception as e:
+            logger.warn("RECORD start failed: {}".format(e))
+        if not opened:
+            sd.enabled = was_enabled
+            logger.warn("RECORD refused ({}): SD mount/session failed (card in?); Wi-Fi left on".format(reason))
+            state.show_notice(["NO SD CARD", "Record needs one", "Wi-Fi stays on"])
             return
         state.power_mode = "record"
         state.streaming = False
@@ -666,14 +737,7 @@ async def power_mode_loop(state, power, select_pin, settings,
                 network.sta.active(False)
             except Exception as e:
                 logger.warn("Wi-Fi off failed: {}".format(e))
-        try:
-            sd.force_enable()
-            if sd.mount() and sd.start_session():
-                logger.info("RECORD entered ({}): Wi-Fi off, SD session open".format(reason))
-            else:
-                logger.warn("RECORD: SD mount/session failed; capturing nothing (card in?)")
-        except Exception as e:
-            logger.warn("RECORD start failed: {}".format(e))
+        logger.info("RECORD entered ({}): Wi-Fi off, SD session open".format(reason))
 
     def _leave_record(reason):
         # Close the SD file cleanly BEFORE the reboot so the last buffered
@@ -758,7 +822,8 @@ async def power_mode_loop(state, power, select_pin, settings,
                     if sel_down:
                         sel_held_ticks += 1
                         if sel_held_ticks >= record_hold_ticks:
-                            state.hold_preview = "record"
+                            if settings.get("record_enabled", True):
+                                state.hold_preview = "record"
                             if not sel_latched:
                                 sel_latched = True
                                 if state.power_mode == "record":
@@ -845,6 +910,7 @@ async def power_mode_loop(state, power, select_pin, settings,
                 vbus_now = power.is_vbus_present()
                 if (state.power_mode == "stream"
                         and vbus_now
+                        and auto_charge_idle_s > 0
                         and state.idle_seconds >= auto_charge_idle_s):
                     _enter_charge("USB + idle {}s".format(auto_charge_idle_s))
                 elif (state.power_mode == "charge"
@@ -895,6 +961,54 @@ async def reboot_watcher(state):
         except BaseException as e:
             logger.warn("reboot_watcher failed: {} ({})".format(type(e).__name__, e))
         await asyncio.sleep_ms(200)
+
+
+# ---------------------------------------------------------------------------
+# First-join fallback (PROVISIONING.md section 2)
+# ---------------------------------------------------------------------------
+
+async def _fall_back_to_setup(settings, display, status_led, reason, hold_s=2):
+    """The very first Wi-Fi join after provisioning failed (wrong password,
+    5 GHz-only network, out of range). Forget the credentials, remember why
+    (last_wifi_error) and which network (last_ssid), then reboot: with no
+    wifi_ssid the next boot lands in the AP branch of main(), which shows
+    the same SSID and PSK plus the reason on the OLED. Returns False without
+    resetting if the settings could not be saved (so a flash fault cannot
+    cause a reset loop); on success machine.reset() does not return."""
+    keys = ("wifi_ssid", "wifi_password", "wifi_joined_ok", "last_wifi_error", "last_ssid")
+    backup = {k: settings.get(k) for k in keys}
+    tried = settings.get("wifi_ssid") or ""
+    record_join_failure(settings, reason)
+    if not SettingsManager.save(settings):
+        for k in keys:
+            settings[k] = backup[k]
+        logger.error("Wi-Fi fallback: could not save settings; staying in normal mode")
+        return False
+    logger.warn("First Wi-Fi join failed ({}); creds cleared, rebooting into setup mode".format(reason))
+    try:
+        display.text_screen(screens.join_failed_lines(reason, tried))
+        status_led.set_rgb(200, 80, 0)   # amber while the reason is on screen
+    except Exception as e:
+        logger.warn("Wi-Fi fallback screen failed: {}".format(e))
+    await asyncio.sleep(hold_s)
+    machine.reset()
+    return True
+
+
+async def _handle_join_result(joined, network, settings, display, status_led):
+    """Decide what a finished network.connect() means. Returns True when the
+    band is resetting into setup mode (the caller should stop booting)."""
+    if joined:
+        # Proven network: from now on a failed join (router off, out of
+        # range) only waits and retries, it never discards the credentials.
+        if record_join_success(settings):
+            SettingsManager.save(settings)
+        return False
+    if network.last_error and not settings.get("wifi_joined_ok"):
+        # Never joined this network. Go back to setup mode so the user can
+        # fix the password / pick a 2.4 GHz network, instead of looping forever.
+        return await _fall_back_to_setup(settings, display, status_led, network.last_error)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -963,12 +1077,11 @@ async def main():
         psk = provisioning.start_ap(
             settings, settings["device_type"], settings["device_id"])
         SettingsManager.save(settings)
-        display.text_screen([
-            "OpenMuscle",
-            "WIFI SETUP",
+        display.text_screen(screens.setup_screen_lines(
             provisioning.ssid_for(settings["device_type"], settings["device_id"]),
-            "PSK " + psk,
-        ])
+            psk,
+            settings.get("last_wifi_error") or "",
+            settings.get("last_ssid") or ""))
 
         info_extras = {
             "caps":   ["sensor", "status", "cmd", "imu"],
@@ -1054,13 +1167,16 @@ async def main():
         "FlexGrid V4",
         settings["device_id"],
         "BAT {:.2f}V".format(power.battery_voltage()),
-        "Booting...",
+        "Joining Wi-Fi...",
     ])
 
+    joined = False
     try:
-        await network.connect()
+        joined = await network.connect()
     except Exception as e:
         logger.error("Network: {}".format(e))
+    if await _handle_join_result(joined, network, settings, display, status_led):
+        return
 
     # Discovery: announce ourselves to the network. Best-effort mDNS plus a
     # broadcast beacon that runs whenever no hub is subscribed.
@@ -1091,7 +1207,7 @@ async def main():
     logger.info("Spawning async tasks")
     asyncio.create_task(cmd_server.serve_forever())
     asyncio.create_task(sensor_loop(state, sensor_matrix, network, sd))
-    asyncio.create_task(display_loop(display, sensor_matrix))
+    asyncio.create_task(display_loop(display, sensor_matrix, state=state))
     # NOTE: menu_loop(menu) is intentionally NOT spawned. MenuManager's
     # check_buttons() busy-waits (`while pin.value()==0: pass`, no await)
     # on any button hold, which froze the entire asyncio event loop and

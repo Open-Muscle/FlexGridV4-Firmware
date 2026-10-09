@@ -21,13 +21,13 @@ Step-by-step for flashing MicroPython + V4 firmware onto a fresh V4 board. Captu
 
    The repo's `flash.py` looks for `firmware/ESP32_GENERIC_S3*.bin` automatically. Newer releases are at <https://micropython.org/download/ESP32_GENERIC_S3/>.
 
-3. **Create `config/settings.json` from the example**:
+3. **Decide how the board gets its Wi-Fi.** For any board that will be handed to someone else, skip this step and flash with `--factory` (see below): it boots to the `WIFI SETUP` screen and the user enters their own Wi-Fi from a phone or the PC app. For your own bench boards you can instead pre-load credentials:
 
    ```bash
    cp config/settings.example.json config/settings.json
    ```
 
-   Edit it and put your real Wi-Fi SSID and password in. This file is gitignored so the credentials never get pushed.
+   Then put your SSID and password in it. The example has blank credentials, so a board flashed with the unedited copy also boots to `WIFI SETUP`. `config/settings.json` is gitignored so credentials never get pushed.
 
 ## Known hardware quirks on V4 boards
 
@@ -64,9 +64,37 @@ Once the board is in DFU mode and you know its COM port:
 python flash.py COM7
 ```
 
-This runs the full sequence: erase, write MicroPython, wait for re-enumeration, push all firmware files, reset. See `flash.py --help` (well, just the docstring at the top) for arguments.
+This runs the full sequence: erase, write MicroPython, wait for re-enumeration, push all firmware files, reset. See the docstring at the top of `flash.py` for arguments.
 
-After flash completes, give the board ~20 seconds to boot and join Wi-Fi, then verify discovery is working:
+### Factory flash (no credentials)
+
+```bash
+python flash.py --factory COM7
+```
+
+Same sequence, but no `config/settings.json` is pushed and none is needed in the checkout. The erase already wiped the board, so it comes up with no Wi-Fi credentials, mints a fresh device id and setup password, and shows this within a few seconds:
+
+```
+WIFI SETUP
+OM-flexgrid-
+<6hex>
+PSK <10 chars>
+```
+
+A re-flash always changes the device id and the setup password, so a band you flashed before will appear as a new device.
+
+### Clearing a used band without re-flashing
+
+```bash
+python wipe.py COM8          # COM8 = the band's running-MicroPython port (303a:4001)
+python wipe.py COM8 --reset  # same, then reboot it
+```
+
+This deletes `config/settings.json`, `log.txt` and `log.txt.bak`. The firmware stays installed; the next boot starts at `WIFI SETUP` with a new device id and setup password. Do this before a band changes hands, because the settings hold the Wi-Fi password and the log can hold the network name.
+
+### After a normal (non-factory) flash
+
+Give the board ~20 seconds to boot and join Wi-Fi, then verify discovery is working:
 
 ```bash
 python -c "import socket, json; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(('', 3141)); print(json.loads(s.recvfrom(4096)[0]))"
@@ -131,8 +159,26 @@ Check the persistent log:
 python -m mpremote connect COM8 fs cat :log.txt
 ```
 
-If the log says "Wi-Fi did not join within 20s", verify `config/settings.json` on the device has the right SSID and password:
+If the log says "Wi-Fi did not join within 20s (wrong_password)" (or `no_ap_found`, `timeout`), the Wi-Fi name or password is wrong, or the network is 5 GHz only. On a band whose first join has never succeeded the firmware then clears the saved password and reboots into `WIFI SETUP`, which shows the same reason on the OLED and in `GET http://192.168.4.1/info` as `last_wifi_error`. Re-enter the credentials from there. A band that has joined once keeps its credentials and keeps retrying, so a router that is off for a while is not a problem.
+
+If you pre-loaded credentials, you can check what is on the device:
 
 ```bash
 python -m mpremote connect COM8 fs cat :config/settings.json
 ```
+
+### Holding SELECT stopped streaming
+
+Holding SELECT for 2 seconds starts RECORD mode (SD logging, Wi-Fi off). It only starts when an SD card mounts; without one the OLED shows `NO SD CARD` and the band keeps streaming. If the OLED shows `RECORDING`, tap SELECT once: the band stops the session, reboots and rejoins Wi-Fi. To disable RECORD for a unit, set `"record_enabled": false` in its `config/settings.json`.
+
+### Band disappeared from the app after sitting on USB
+
+CHARGE mode turns Wi-Fi off. It starts when you hold MENU for 2 seconds, or automatically after `auto_charge_idle_s` (default 300) seconds on USB with no hub connected. The OLED shows `CHARGE MODE / Wi-Fi is OFF`; tap SELECT or hold MENU 2 seconds to reboot back onto Wi-Fi.
+
+## Running the desktop tests
+
+```bash
+python -m unittest discover -s tests
+```
+
+No board is needed; the MicroPython modules are stubbed.

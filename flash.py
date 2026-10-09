@@ -3,11 +3,19 @@
 Steps performed for the given COM port (the ROM bootloader DFU port):
     1. esptool erase_flash + write_flash of MicroPython 1.28.0
     2. Wait for the board to re-enumerate as USB-Serial-JTAG (a different COM)
-    3. Push all V4 firmware files + lib/ssd1306.py + config/settings.json
+    3. Push all V4 firmware files + lib/ssd1306.py (and config/settings.json
+       unless --factory is given)
     4. machine.reset() the device
 
 Usage:
-    python flash.py <bootloader_com> [<runtime_com>]
+    python flash.py [--factory] <bootloader_com> [<runtime_com>]
+        --factory:        push NO config/settings.json. The erase in step 1
+                          already wiped the board, so it boots with no Wi-Fi
+                          credentials, mints a fresh device id and setup
+                          password, and shows WIFI SETUP on the OLED. Use this
+                          for any board that will be handed to someone else;
+                          the user then gives it their own Wi-Fi from a phone
+                          or the PC app. No config/settings.json is needed.
         <bootloader_com>: the COM port the board shows up on while in DFU mode
                           (VID:PID 303a:1001 in `mpremote connect list`)
         <runtime_com>:    optional. The COM port the board re-enumerates as
@@ -19,12 +27,18 @@ Pre-requisites:
       up as VID:PID 303a:1001 while blank/in-ROM; esptool's default_reset auto-
       enters the download mode over that interface, so NO manual BOOT+RESET DFU
       dance is needed. After MicroPython boots it re-enumerates as 303a:4001.
-    - Real Wi-Fi credentials present at config/settings.json
-      (copy from config/settings.example.json and edit)
+    - Without --factory: config/settings.json present (copy
+      config/settings.example.json; the example has blank Wi-Fi credentials,
+      so the board still boots to WIFI SETUP unless you fill them in)
     - MicroPython firmware downloaded to firmware/ESP32_GENERIC_S3-*.bin
       (or set MICROPYTHON_BIN env var to a custom path)
     - esptool + mpremote installed in the same interpreter that runs this
       script (tested with esptool 4.8.1 and mpremote 1.25.0).
+
+Re-flashing always erases the whole chip, so the board gets a NEW device id
+(flexgrid-<6hex>) and a NEW setup password (PSK). A band that was already in
+use appears as a different device afterwards. To clear a used band WITHOUT
+re-flashing (settings.json, log.txt, log.txt.bak), run wipe.py.
 """
 import os
 import subprocess
@@ -289,19 +303,69 @@ def push_files_raw(runtime_com, files_to_push):
         s.close()
 
 
+def parse_args(argv):
+    """Returns (factory, positional_args). Unknown --flags are an error so a
+    typo such as --factroy cannot silently push a settings file."""
+    factory = False
+    positional = []
+    for a in argv:
+        if a == "--factory":
+            factory = True
+        elif a.startswith("--"):
+            raise SystemExit("Unknown option {}. See the top of flash.py.".format(a))
+        else:
+            positional.append(a)
+    return factory, positional
+
+
+def firmware_files(factory):
+    """(local, remote) pairs to push. main.py goes last (see STEP 3 note);
+    config/settings.json is left out entirely in factory mode."""
+    files = [
+        ("flexgrid.py",                   "flexgrid.py"),
+        ("lib/pinmap.py",                 "lib/pinmap.py"),
+        ("lib/settings_manager.py",       "lib/settings_manager.py"),
+        ("lib/logger.py",                 "lib/logger.py"),
+        ("lib/power_manager.py",          "lib/power_manager.py"),
+        ("lib/sensor_matrix.py",          "lib/sensor_matrix.py"),
+        ("lib/display_manager.py",        "lib/display_manager.py"),
+        ("lib/screens.py",                "lib/screens.py"),
+        ("lib/menu_manager.py",           "lib/menu_manager.py"),
+        ("lib/ssd1306.py",                "lib/ssd1306.py"),
+        ("lib/network_manager.py",        "lib/network_manager.py"),
+        ("lib/status_led.py",             "lib/status_led.py"),
+        ("lib/subscribers.py",            "lib/subscribers.py"),
+        ("lib/commands.py",               "lib/commands.py"),
+        ("lib/discovery.py",              "lib/discovery.py"),
+        ("lib/imu.py",                    "lib/imu.py"),
+        ("lib/sd_logger.py",              "lib/sd_logger.py"),
+        ("lib/provisioning.py",           "lib/provisioning.py"),
+    ]
+    if not factory:
+        files.append(("config/settings.json", "config/settings.json"))
+    files.append(("boot.py", "boot.py"))
+    files.append(("main.py", "main.py"))
+    return files
+
+
 def main():
-    if len(sys.argv) < 2:
+    factory, args = parse_args(sys.argv[1:])
+    if not args:
         print(__doc__)
         return 1
-    bootloader_com = ensure_bootloader(sys.argv[1])
-    runtime_com = sys.argv[2] if len(sys.argv) > 2 else None
+    bootloader_com = ensure_bootloader(args[0])
+    runtime_com = args[1] if len(args) > 1 else None
 
     bin_path = find_micropython_bin()
     settings_path = os.path.join(HERE, "config", "settings.json")
-    if not os.path.exists(settings_path):
+    if factory:
+        print("FACTORY mode: config/settings.json will NOT be pushed; the board "
+              "will boot to WIFI SETUP.")
+    elif not os.path.exists(settings_path):
         raise SystemExit(
-            "config/settings.json missing. Copy config/settings.example.json and "
-            "fill in real wifi_ssid and wifi_password before running."
+            "config/settings.json missing. Either run with --factory (board boots "
+            "to WIFI SETUP, no file needed), or copy config/settings.example.json "
+            "to config/settings.json first."
         )
 
     # Snapshot every serial port present BEFORE we flash, so STEP 2 can pick out
@@ -366,28 +430,7 @@ def main():
     # By writing every module first and main.py (the auto-run trigger) last,
     # no soft reset ever launches an incomplete app, so every push lands on a
     # clean REPL. See the board-3 recovery in BRINGUP notes.
-    files_to_push = [
-        ("flexgrid.py",                   "flexgrid.py"),
-        ("lib/pinmap.py",                 "lib/pinmap.py"),
-        ("lib/settings_manager.py",       "lib/settings_manager.py"),
-        ("lib/logger.py",                 "lib/logger.py"),
-        ("lib/power_manager.py",          "lib/power_manager.py"),
-        ("lib/sensor_matrix.py",          "lib/sensor_matrix.py"),
-        ("lib/display_manager.py",        "lib/display_manager.py"),
-        ("lib/menu_manager.py",           "lib/menu_manager.py"),
-        ("lib/ssd1306.py",                "lib/ssd1306.py"),
-        ("lib/network_manager.py",        "lib/network_manager.py"),
-        ("lib/status_led.py",             "lib/status_led.py"),
-        ("lib/subscribers.py",            "lib/subscribers.py"),
-        ("lib/commands.py",               "lib/commands.py"),
-        ("lib/discovery.py",              "lib/discovery.py"),
-        ("lib/imu.py",                    "lib/imu.py"),
-        ("lib/sd_logger.py",              "lib/sd_logger.py"),
-        ("lib/provisioning.py",           "lib/provisioning.py"),
-        ("config/settings.json",          "config/settings.json"),
-        ("boot.py",                       "boot.py"),
-        ("main.py",                       "main.py"),
-    ]
+    files_to_push = firmware_files(factory)
     # Push everything over a single raw-REPL serial session (see push_files_raw).
     # This replaced the old per-file `mpremote fs cp` loop, which flaked with
     # "could not enter raw repl" on the S3 CDC and could wedge a board entirely.
@@ -399,9 +442,14 @@ def main():
     print("=" * 60)
 
     print()
-    print("Done. Give the board ~15 s to join Wi-Fi and listen for the")
-    print("UDP broadcast announce on port 3140 to confirm:")
-    print('  {} -c "import socket,json; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind((\'\',3140)); print(json.loads(s.recvfrom(4096)[0]))"'.format(os.path.basename(PY)))
+    if factory:
+        print("Done. The board has no Wi-Fi credentials: within a few seconds the OLED")
+        print("shows WIFI SETUP with its own network name and password. New device id")
+        print("and setup password were generated by this flash.")
+    else:
+        print("Done. Give the board ~15 s to join Wi-Fi and listen for the")
+        print("UDP broadcast announce on port 3140 to confirm:")
+        print('  {} -c "import socket,json; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind((\'\',3140)); print(json.loads(s.recvfrom(4096)[0]))"'.format(os.path.basename(PY)))
     return 0
 
 

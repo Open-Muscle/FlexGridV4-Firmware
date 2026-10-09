@@ -12,13 +12,21 @@
 # Endpoints (PROVISIONING.md section 4):
 #   GET  /info           -> device id, dev type, fw, caps, state, matrix
 #   POST /provision      -> {ssid, password, hub_host?, hub_port?} ->
-#                          persist + ack + soft-reset
+#                          persist + ack + soft-reset. SSID/password lengths
+#                          are checked in UTF-8 bytes (32 / 63) and stored
+#                          exactly as sent (no stripping).
 #   POST /reprovision    -> clear ssid + rotate PSK + soft-reset (callable
 #                          from the STA-mode normal LAN once provisioned;
 #                          available from AP mode too as an idempotent ack)
 #   GET  /               -> minimal HTML captive-portal page (optional v1.0;
 #                          we ship it because the cost is one f-string and
 #                          it doubles the no-app fallback path)
+#
+# The HTTP reader honours Content-Length: it reads until the header
+# terminator, then until the declared body is complete (cap MAX_BODY_BYTES,
+# READ_TIMEOUT_S overall), because a client may send headers and body in
+# separate TCP segments. Anything oversized gets 413, a short body gets 400
+# "incomplete_body".
 #
 # Security model: WPA2-PSK with a per-device RANDOM PSK that is delivered
 # OUT OF BAND via the OLED. Never derived from any public field, never
@@ -51,6 +59,19 @@ AP_AUTH_WPA2_PSK = 3   # network.AUTH_WPA2_PSK == 3 on ESP32 MicroPython
 HTTP_PORT       = 80
 PROVISION_REBOOT_DELAY_MS = 1500
 
+# Request limits. The body of a valid /provision is well under 300 bytes
+# (32-byte SSID + 63-byte password + JSON); 2 KB leaves room for escapes.
+MAX_HEAD_BYTES  = 4096
+MAX_BODY_BYTES  = 2048
+READ_CHUNK      = 512
+READ_TIMEOUT_S  = 3
+
+# WPA2 limits, in bytes (a UTF-8 SSID with accents is shorter in characters
+# than in bytes, and it is bytes the radio cares about).
+SSID_MAX_BYTES  = 32
+PSK_MIN_BYTES   = 8
+PSK_MAX_BYTES   = 63
+
 
 def mint_psk():
     """Generate a 10-char random PSK from os.urandom. ~50 bits of entropy.
@@ -73,17 +94,79 @@ def ssid_for(device_type, device_id):
 # Bodies are JSON unless the route returns HTML.
 # ---------------------------------------------------------------------------
 
+class _HttpError(Exception):
+    """Raised while reading a request; carries the response to send."""
+    def __init__(self, code, text, message):
+        self.code = code
+        self.text = text
+        self.message = message
+
+
+def _head_end(raw):
+    """Returns (index of the header terminator, its length), or (-1, 0) when
+    the headers are not complete yet. Tolerates LF or CRLF."""
+    i = raw.find(b"\r\n\r\n")
+    if i >= 0:
+        return i, 4
+    i = raw.find(b"\n\n")
+    if i >= 0:
+        return i, 2
+    return -1, 0
+
+
+def _content_length(head):
+    """Content-Length from a header block (bytes), or None if absent."""
+    for ln in head.decode("utf-8", "replace").split("\n")[1:]:
+        k, sep, v = ln.partition(":")
+        if sep and k.strip().lower() == "content-length":
+            v = v.strip()
+            if not v.isdigit():
+                raise _HttpError(400, "Bad Request", "bad_content_length")
+            return int(v)
+    return None
+
+
+async def _read_request(reader):
+    """Read one full HTTP request: headers up to the blank line, then the
+    body up to Content-Length. A single reader.read() is not enough because
+    clients (browsers, http.client, curl on a slow link) may send the headers
+    and the body in separate TCP segments. Returns the raw bytes (b"" if the
+    peer connected and closed without sending anything). Raises _HttpError
+    for oversized or truncated requests; the caller applies the timeout."""
+    raw = b""
+    while True:
+        end, sep = _head_end(raw)
+        if end >= 0:
+            break
+        if len(raw) > MAX_HEAD_BYTES:
+            raise _HttpError(413, "Payload Too Large", "request_too_large")
+        chunk = await reader.read(READ_CHUNK)
+        if not chunk:
+            if raw:
+                raise _HttpError(400, "Bad Request", "incomplete_body")
+            return raw
+        raw += chunk
+    want = _content_length(raw[:end])
+    if want is None:
+        return raw
+    if want > MAX_BODY_BYTES:
+        raise _HttpError(413, "Payload Too Large", "request_too_large")
+    need = end + sep + want
+    while len(raw) < need:
+        chunk = await reader.read(READ_CHUNK)
+        if not chunk:
+            raise _HttpError(400, "Bad Request", "incomplete_body")
+        raw += chunk
+    return raw
+
+
 def _parse_request(raw):
     """Returns (method, path, headers_dict, body_bytes). Tolerates LF or
-    CRLF; rejects malformed requests by raising ValueError."""
-    head_end = raw.find(b"\r\n\r\n")
+    CRLF; rejects malformed requests by raising ValueError. The body is cut
+    to Content-Length when the header is present."""
+    head_end, sep_len = _head_end(raw)
     if head_end < 0:
-        head_end = raw.find(b"\n\n")
-        if head_end < 0:
-            raise ValueError("incomplete request head")
-        sep_len = 2
-    else:
-        sep_len = 4
+        raise ValueError("incomplete request head")
     head = raw[:head_end].decode("utf-8", "replace")
     body = raw[head_end + sep_len:]
     lines = head.split("\n")
@@ -100,6 +183,9 @@ def _parse_request(raw):
             continue
         k, v = ln.split(":", 1)
         headers[k.strip().lower()] = v.strip()
+    cl = headers.get("content-length", "")
+    if cl.isdigit():
+        body = body[:int(cl)]
     return method, path, headers, body
 
 
@@ -175,6 +261,12 @@ class _ProvisioningState:
             "fw":    self.settings.get("fw_version"),
             "caps":  self.info_extras.get("caps", []),
             "state": self.state,
+            # Why the last attempt to join a home network failed
+            # (wrong_password | no_ap_found | timeout), or "". Lets a phone
+            # or the PC app say "that password did not work" after the band
+            # drops back into setup mode. last_ssid is the network it tried.
+            "last_wifi_error": self.settings.get("last_wifi_error") or "",
+            "last_ssid":       self.settings.get("last_ssid") or "",
         }
         # Optional device-type-specific fields (e.g. matrix dims for FlexGrid)
         for k, v in self.info_extras.items():
@@ -184,16 +276,40 @@ class _ProvisioningState:
         return d
 
 
+def _error_json(message, ack_type=None):
+    d = {"status": "error", "data": {"message": message}}
+    if ack_type:
+        d["v"] = "1.0"
+        d["type"] = ack_type
+    return ujson.dumps(d)
+
+
+def _wifi_bytes_ok(value, lo, hi):
+    return isinstance(value, str) and lo <= len(value.encode("utf-8")) <= hi
+
+
 async def _handle(reader, writer, state):
     try:
-        raw = await reader.read(2048)
+        try:
+            raw = await asyncio.wait_for(_read_request(reader), READ_TIMEOUT_S)
+        except _HttpError as e:
+            _respond(writer, e.code, e.text, _error_json(e.message))
+            await writer.drain()
+            return
+        except (asyncio.CancelledError, SystemExit):
+            raise
+        except Exception:
+            # wait_for timed out (or the socket died) before the declared
+            # body arrived.
+            _respond(writer, 400, "Bad Request", _error_json("incomplete_body"))
+            await writer.drain()
+            return
         if not raw:
             return
         try:
             method, path, headers, body = _parse_request(raw)
         except ValueError as e:
-            _respond(writer, 400, "Bad Request",
-                     ujson.dumps({"status": "error", "data": {"message": str(e)}}))
+            _respond(writer, 400, "Bad Request", _error_json(str(e)))
             await writer.drain()
             return
 
@@ -203,40 +319,49 @@ async def _handle(reader, writer, state):
         elif method == "POST" and path == "/provision":
             try:
                 req = _json_body(headers, body)
+                if not isinstance(req, dict):
+                    raise ValueError("invalid_json: expected an object")
             except ValueError as e:
-                _respond(writer, 400, "Bad Request",
-                         ujson.dumps({"v": "1.0", "type": "provision_ack",
-                                      "status": "error",
-                                      "data": {"message": str(e)}}))
+                _respond(writer, 400, "Bad Request", _error_json(str(e), "provision_ack"))
                 await writer.drain()
                 return
-            ssid = (req.get("ssid") or "").strip()
-            password = req.get("password") or ""
+            # SSID and password are stored exactly as sent: an SSID may
+            # legitimately begin or end with a space, and a stripped copy
+            # would never join. Lengths are UTF-8 bytes, as WPA2 counts them.
+            ssid = req.get("ssid")
+            password = req.get("password")
+            if password is None:
+                password = ""
             hub_host = req.get("hub_host")
             hub_port = req.get("hub_port")
-            if not (1 <= len(ssid) <= 32):
+            if not _wifi_bytes_ok(ssid, 1, SSID_MAX_BYTES) or not ssid.strip():
                 _respond(writer, 400, "Bad Request",
-                         ujson.dumps({"v": "1.0", "type": "provision_ack",
-                                      "status": "error",
-                                      "data": {"message": "ssid_length_invalid (1..32)"}}))
+                         _error_json("ssid_length_invalid (1..32 bytes)", "provision_ack"))
                 await writer.drain()
                 return
-            if password and not (8 <= len(password) <= 63):
+            if password and not _wifi_bytes_ok(password, PSK_MIN_BYTES, PSK_MAX_BYTES):
                 _respond(writer, 400, "Bad Request",
-                         ujson.dumps({"v": "1.0", "type": "provision_ack",
-                                      "status": "error",
-                                      "data": {"message": "password_length_invalid (8..63 for WPA2, or empty)"}}))
+                         _error_json("password_length_invalid (8..63 bytes for WPA2, or empty)",
+                                     "provision_ack"))
                 await writer.drain()
                 return
-            # Persist creds. Do NOT verify the join here; if the user typed
-            # the password wrong, STA fails to join and the device falls
-            # back to unprovisioned on next boot (section 2).
+            # Persist creds. Do NOT verify the join here: the AP and STA share
+            # one radio, so the join happens after the reboot. If the user
+            # typed the password wrong the first join fails and flexgrid.py
+            # sends the band back to setup mode (wifi_joined_ok stays False
+            # until a join succeeds; last_wifi_error then says why).
             state.settings["wifi_ssid"] = ssid
             state.settings["wifi_password"] = password
+            state.settings["wifi_joined_ok"] = False
+            state.settings["last_wifi_error"] = ""
+            state.settings["last_ssid"] = ""
             if hub_host:
                 state.settings["hub_host"] = hub_host
             if hub_port:
-                state.settings["hub_port"] = int(hub_port)
+                try:
+                    state.settings["hub_port"] = int(hub_port)
+                except (TypeError, ValueError):
+                    pass
             state.settings_manager.save(state.settings)
             logger.info("Provisioned: ssid='{}' (saved); rebooting in {}ms".format(
                 ssid, PROVISION_REBOOT_DELAY_MS))
@@ -253,6 +378,9 @@ async def _handle(reader, writer, state):
             # not present the same PSK to the next owner.
             state.settings["wifi_ssid"] = ""
             state.settings["wifi_password"] = ""
+            state.settings["wifi_joined_ok"] = False
+            state.settings["last_wifi_error"] = ""
+            state.settings["last_ssid"] = ""
             state.settings["provisioning_psk"] = mint_psk()
             state.settings_manager.save(state.settings)
             logger.info("Reprovision requested; PSK rotated; rebooting in {}ms".format(
