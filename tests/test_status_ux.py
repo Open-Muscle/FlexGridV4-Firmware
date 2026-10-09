@@ -1,8 +1,9 @@
 """Status UX: what the band shows on its OLED and LED in setup mode, while
 joining, after joining, when Wi-Fi drops and when the battery runs low.
 
-The LED table in TestLedTable is the contract documented in README.md
-("LED guide"); change one and the other has to change with it.
+The LED table in TestLedTable is the contract documented in
+docs/device-reference.md ("The status light"); change one and the other has to
+change with it.
 """
 import asyncio
 import gc
@@ -193,13 +194,13 @@ class TestLedTable(unittest.TestCase):
             self.assertNotIn(entry, seen, "{} looks the same as {}".format(name, seen.get(entry)))
             seen[entry] = name
 
-    def test_readme_led_guide_lists_every_state(self):
-        with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
-            readme = f.read()
-        legacy = {"boot", "idle", "error", "calibrating"}
+    def test_device_reference_led_guide_lists_every_state(self):
+        with open(os.path.join(ROOT, "docs", "device-reference.md"), encoding="utf-8") as f:
+            ref = f.read()
+        legacy = {"idle", "error", "calibrating"}
         for name in status_led.PALETTE_DEFAULT:
             if name not in legacy:
-                self.assertIn("`{}`".format(name), readme, name)
+                self.assertIn("`{}`".format(name), ref, name)
 
     def test_setup_blink_is_one_hertz_blue(self):
         r, g, b, mode = status_led.PALETTE_DEFAULT["setup"]
@@ -518,7 +519,8 @@ class TestDisplayGeometry(unittest.TestCase):
         self.assertEqual(SettingsManager.DEFAULTS["display_height"], 32)
 
     def test_docs_agree_on_the_size(self):
-        for name in ("README.md", os.path.join("lib", "pinmap.py")):
+        for name in ("README.md", os.path.join("docs", "device-reference.md"),
+                     os.path.join("lib", "pinmap.py")):
             with open(os.path.join(ROOT, name), encoding="utf-8") as f:
                 text = f.read()
             self.assertIn("128x32", text, name)
