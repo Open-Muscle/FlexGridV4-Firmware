@@ -288,9 +288,11 @@ class _DeviceState:
     def show_notice(self, lines, hold_ms=3000):
         self.notice = (list(lines), time.ticks_add(time.ticks_ms(), hold_ms))
 
-    def show_status(self, page=0, hold_ms=STATUS_HOLD_MS):
+    def show_status(self, page=0, hold_ms=None):
         """Put a status page (0 = network, 1 = device) on the OLED for
-        hold_ms, then fall back to the heatmap."""
+        hold_ms (default STATUS_HOLD_MS), then fall back to the heatmap."""
+        if hold_ms is None:
+            hold_ms = STATUS_HOLD_MS
         self.view_page = page
         self.view_until = time.ticks_add(time.ticks_ms(), hold_ms)
 

@@ -804,3 +804,140 @@ class TestJoinFailedUsesAnimator(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Whole boot of a provisioned band, with the hardware faked
+# ---------------------------------------------------------------------------
+
+class FakeHeatDisplay(FakeDisplay):
+    def __init__(self):
+        super().__init__()
+        self.heatmaps = 0
+
+    def draw_sensor_matrix(self, matrix):
+        self.heatmaps += 1
+
+
+class FakeNet:
+    def __init__(self, join_after_s, joins=True):
+        self.join_after_s = join_after_s
+        self.joins = joins
+        self.up = False
+        self.last_error = "" if joins else "wrong_password"
+        self.sta = mock.MagicMock()
+
+    async def connect(self):
+        await asyncio.sleep(self.join_after_s)
+        self.up = self.joins
+        return self.joins
+
+    def is_connected(self):
+        return self.up
+
+    def local_ip(self):
+        return "192.168.1.50" if self.up else None
+
+    def rssi(self):
+        return -48
+
+
+class TestProvisionedBoot(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        self.addCleanup(os.chdir, cwd)
+        os.makedirs("config")
+
+    def boot(self, net, seconds, settings_extra=None):
+        flexgrid.machine.reset.reset_mock()
+        s = SettingsManager.load()
+        s.update({"wifi_ssid": "HomeNet", "wifi_password": "pw-pw-pw-1", "wifi_joined_ok": True})
+        s.update(settings_extra or {})
+        SettingsManager.save(s)
+        display = FakeHeatDisplay()
+        led_log = []
+
+        class Led(FakeLed):
+            def set_state(self, name):
+                if not led_log or led_log[-1] != name:
+                    led_log.append(name)
+
+        power = mock.MagicMock()
+        power.battery_voltage.return_value = 3.95
+        power.battery_percent.return_value = 64
+        power.is_vbus_present.return_value = False
+        power.is_battery_full.return_value = False
+        imu = mock.MagicMock()
+        imu.present = False
+        sd = mock.MagicMock()
+        sd.enabled = False
+        sd.is_recording.return_value = False
+
+        async def forever(*a, **k):
+            while True:
+                await asyncio.sleep(1)
+
+        disc = mock.MagicMock()
+        disc.announce_loop = forever
+        disc.discover_listener_loop = forever
+        cmd = mock.MagicMock()
+        cmd.serve_forever = forever
+
+        patches = [
+            mock.patch.object(flexgrid, "DisplayManager", lambda **kw: display),
+            mock.patch.object(flexgrid, "StatusLed", lambda: Led()),
+            mock.patch.object(flexgrid, "PowerManager", lambda **kw: power),
+            mock.patch.object(flexgrid, "SensorMatrix", lambda: mock.MagicMock(matrix=[[0] * 4] * 15)),
+            mock.patch.object(flexgrid, "NetworkManager", lambda st, subs: net),
+            mock.patch.object(flexgrid, "MenuManager", lambda *a: mock.MagicMock()),
+            mock.patch.object(flexgrid, "IMU", lambda: imu),
+            mock.patch.object(flexgrid, "SDLogger", lambda st: sd),
+            mock.patch.object(flexgrid, "Discovery", lambda *a, **k: disc),
+            mock.patch.object(flexgrid, "CommandServer", lambda **k: cmd),
+            mock.patch.object(flexgrid.provisioning, "serve", forever),
+            mock.patch.object(flexgrid.logger, "init_persistent", lambda: None),
+            mock.patch.object(flexgrid, "JOINED_LED_MS", 150),
+            mock.patch.object(gc, "mem_free", lambda: 1000, create=True),
+        ]
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in reversed(patches)])
+
+        async def go():
+            task = asyncio.create_task(flexgrid.main())
+            await asyncio.sleep(seconds)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        asyncio.run(go())
+        return display, led_log
+
+    def test_joining_then_joined_then_idle_and_ip_is_shown(self):
+        with mock.patch.object(flexgrid, "STATUS_HOLD_MS", 250):
+            display, led_log = self.boot(FakeNet(0.2), 0.9)
+        self.assertEqual(led_log[:3], ["joining", "joined", "idle_unassigned"])
+        self.assertEqual(display.shown[0], ["OpenMuscle V4", SettingsManager.load()["device_id"],
+                                            "Joining Wi-Fi...", "HomeNet"])
+        pages = [f for f in display.shown if f[0] == "WIFI OK"]
+        self.assertTrue(pages, display.shown)
+        self.assertEqual(pages[0][1], "192.168.1.50")
+        self.assertGreater(display.heatmaps, 2)       # the heatmap comes back after the status page
+
+    def test_router_off_after_a_good_join_shows_wifi_lost_not_setup(self):
+        display, led_log = self.boot(FakeNet(0.1, joins=False), 0.5)
+        flexgrid.machine.reset.assert_not_called()
+        self.assertEqual(led_log[0], "joining")
+        self.assertIn("wifi_lost", led_log)
+        self.assertEqual(SettingsManager.load()["wifi_ssid"], "HomeNet")
+
+    def test_first_join_failure_goes_back_to_setup_with_amber_blink(self):
+        display, led_log = self.boot(FakeNet(0.1, joins=False), 2.5,
+                                     {"wifi_joined_ok": False})
+        self.assertIn("join_failed", led_log)
+        self.assertIn(["WIFI FAILED", "check password", "back to setup"], display.shown)
+        flexgrid.machine.reset.assert_called()
