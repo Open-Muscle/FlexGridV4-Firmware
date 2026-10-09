@@ -982,6 +982,8 @@ async def power_mode_loop(state, power, select_pin, settings,
                 # Skip single-button handling while the chord is forming.
                 menu_held_ticks = 0
                 menu_latched = False
+                sel_held_ticks = 0
+                sel_latched = False
             else:
                 if chord_held_ticks:
                     state.hold_preview = None

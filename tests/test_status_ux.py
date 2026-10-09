@@ -713,7 +713,7 @@ class ScriptedPin:
 
 
 class TestMenuButton(unittest.TestCase):
-    def run_buttons(self, menu, select=(), timeout=3.0):
+    def run_buttons(self, menu, select=(), timeout=3.0, charge_hold_s=0.03):
         """Run power_mode_loop until both button scripts are used up (one
         value per 5 ms tick), then a little longer for the last action."""
         st = settled(make_state())
@@ -725,7 +725,7 @@ class TestMenuButton(unittest.TestCase):
             task = asyncio.create_task(flexgrid.power_mode_loop(
                 st, power, select_pin, {"auto_charge_idle_s": 0},
                 menu_pin=menu_pin, network=network, sd=None,
-                tick_ms=5, charge_hold_s=0.03))
+                tick_ms=5, charge_hold_s=charge_hold_s))
             end = asyncio.get_running_loop().time() + timeout
             while (menu_pin.levels or select_pin.levels) and asyncio.get_running_loop().time() < end:
                 await asyncio.sleep(0.01)
@@ -773,6 +773,17 @@ class TestMenuButton(unittest.TestCase):
         select = [0] * 8
         st, network = self.run_buttons(menu, select)
         self.assertIsNone(st.status_page_now(time_now()))
+        self.assertEqual(st.power_mode, "stream")
+        flexgrid.machine.reset.assert_not_called()
+
+    def test_aborted_chord_with_select_first_does_not_tap_select(self):
+        # SELECT is held first, MENU joins for 8 ticks and is let go (under the
+        # 3 s chord time), SELECT stays down. The stale SELECT hold count must
+        # not fire a tap that flips the power mode while the finger is down.
+        menu = [1] * 8 + [0] * 8 + [1] * 14
+        select = [0] * 30
+        # long hold times so only the stray tap (not a 2 s hold) can act
+        st, network = self.run_buttons(menu, select, charge_hold_s=1.0)
         self.assertEqual(st.power_mode, "stream")
         flexgrid.machine.reset.assert_not_called()
 
