@@ -1,6 +1,6 @@
 {
-    "wifi_ssid": "YOUR_SSID",
-    "wifi_password": "YOUR_PASSWORD",
+    "wifi_ssid": "",
+    "wifi_password": "",
     "device_type": "flexgrid",
     "fw_version": "v4.0.0",
     "udp_sensor_port": 3141,
@@ -13,6 +13,9 @@
     "status_interval_s": 5,
     "imu_enabled": true,
     "sd_logging": false,
+    "record_enabled": true,
+    "auto_charge_idle_s": 300,
+    "sta_join_timeout_s": 20,
     "haptic_enabled": false,
     "status_palette": "default",
     "display_brightness": 255
