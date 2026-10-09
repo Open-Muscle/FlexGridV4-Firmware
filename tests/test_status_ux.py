@@ -193,6 +193,14 @@ class TestLedTable(unittest.TestCase):
             self.assertNotIn(entry, seen, "{} looks the same as {}".format(name, seen.get(entry)))
             seen[entry] = name
 
+    def test_readme_led_guide_lists_every_state(self):
+        with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        legacy = {"boot", "idle", "error", "calibrating"}
+        for name in status_led.PALETTE_DEFAULT:
+            if name not in legacy:
+                self.assertIn("`{}`".format(name), readme, name)
+
     def test_setup_blink_is_one_hertz_blue(self):
         r, g, b, mode = status_led.PALETTE_DEFAULT["setup"]
         self.assertEqual((r, g > 0, b > 0, mode), (0, False, True, "blink_slow"))

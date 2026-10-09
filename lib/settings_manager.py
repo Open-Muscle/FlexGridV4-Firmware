@@ -86,6 +86,9 @@ class SettingsManager:
         # RED right, GREEN labeler, WHITE unassigned). Persistent so
         # the device remembers which side it's worn on across reboots.
         "role":              "",
+        # Free-text name for the sticker (set by tools/kit_check.py --label).
+        # Informational only; the firmware never reads it.
+        "device_label":      "",
 
         # Hardware VBUS-detect GPIO. None on as-built V4 (the R19/R20
         # divider exists only in the V4.2 schematic; GPIO39 floats on
