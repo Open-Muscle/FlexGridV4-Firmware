@@ -1,20 +1,106 @@
 # FlexGrid V4 Firmware
 
-MicroPython firmware for the OpenMuscle FlexGrid V4 wearable sensor bracelet. ESP32-S3-WROOM-1-N16R8 host, 60-sensor Velostat matrix on the flex PCB, plus new V4 additions: ICM-42688-P IMU, onboard microSD logging, and an RGB status LED.
+MicroPython firmware for the OpenMuscle FlexGrid V4 wearable pressure-sensor band: a 60-sensor (15 by 4) Velostat grid, a 128x32 screen, a status light, two buttons, an optional microSD card, a motion sensor and a Wi-Fi radio (ESP32-S3). The band streams its pressure grid to the OpenMuscle app on your computer over your own Wi-Fi.
 
-> **Status: in development (June 2026).** Built against the OpenMuscle device-discovery + dual-transport protocol (see [`OpenMuscle-Connect/docs/DEVICE-DISCOVERY-SPEC.md`](https://github.com/Open-Muscle/OpenMuscle-Connect/blob/main/docs/DEVICE-DISCOVERY-SPEC.md) and `WIRE-FORMAT.md`). V4 boards are in fab; firmware will be flashed and brought up when boards arrive.
+Firmware version `v4.0.0`. MIT licence.
 
-## What this firmware does
+## Where to start
 
-- Scans the 15 by 4 Velostat sensor matrix at the configured rate (default ~59 Hz).
-- Reads the ICM-42688-P IMU for orientation.
-- Announces itself on the local Wi-Fi network via mDNS (`_openmuscle._udp`) and a UDP broadcast beacon fallback. No hardcoded destination IP.
-- Accepts hub subscriptions via a small command channel; unicasts each sensor frame to every subscribed hub (cap: 4 subscribers, 5 s heartbeat timeout).
-- Logs sessions to microSD when triggered (untethered mode).
-- Drives an RGB status LED to surface device state at a glance.
-- Adds BLE GATT advertising and notification (phase 4, after Wi-Fi is bedded in).
+| You are... | Read |
+|---|---|
+| **Using a band you were given** | [Using your band](#using-your-band) below, then the one-page card in [docs/device-reference.md](docs/device-reference.md#quick-card-print-this-section) |
+| Wondering what a light, screen or button means | [docs/device-reference.md](docs/device-reference.md) |
+| **Preparing bands to ship to someone** | [docs/kit-prep.md](docs/kit-prep.md) |
+| Flashing or rebuilding a band, or developing the firmware | [BRINGUP.md](BRINGUP.md) and [For developers](#for-developers) below |
+| Installing the computer app | The OpenMuscle-Software repository: `docs/getting-started.md`, and `docs/wifi-setup.md` for the Wi-Fi steps |
 
-## How V4 differs from V3 (firmware-relevant)
+---
+
+## Using your band
+
+### 1. Charge it and switch it on
+
+Plug in a USB-C **data** cable (some cables only charge; either way the band charges). The small CHRG light on the board shows that the charger is working, whatever the band's screen says. The band is switched on and off with its power button (see the confirm list in [docs/device-reference.md](docs/device-reference.md#facts-still-to-confirm-on-a-physical-band) for how long to press).
+
+Details, charge times and the parts still to be confirmed on hardware are in [docs/device-reference.md](docs/device-reference.md#power-charging-and-the-battery).
+
+### 2. Give it your Wi-Fi (first time only)
+
+You need a Wi-Fi network that is **2.4 GHz**, has a **password**, has **no sign-in page**, and lets devices on it see each other. A home router, an office network without a login page, or a phone hotspot set to 2.4 GHz all work. Hotel, school and cafe networks with a sign-in page, and username-and-password (enterprise) networks, do not.
+
+A new band shows this and blinks its light **blue** once a second:
+
+```
+WIFI SETUP        <- this top line alternates with "see guide"
+OM-flexgrid-
+d7af0b
+PW kd3mpq72xy
+```
+
+1. On a phone or laptop open Wi-Fi settings and join the network named on the screen. Read the two lines as one name (`OM-flexgrid-d7af0b`). The password is the 10 characters after `PW` (lower-case letters and the digits 2 to 9 only: never a zero, a one, an `o` or an `l`).
+2. Your phone or laptop may say "no internet" or ask to stay connected. Stay connected. Some laptops jump back to a known network: turn off auto-join for it until you are done.
+3. Open a web browser and go to `http://192.168.4.1` (type `http://`, not `https://`).
+4. Type your Wi-Fi name and password and press **Connect**.
+5. The page says the band is restarting. Join your normal Wi-Fi again on the phone or laptop.
+
+The band now tries to join: blue steady light and `Joining Wi-Fi...` for up to 20 seconds. On success the light turns **green** for 2 seconds, and the screen shows `WIFI OK` and the band's address, then the live pressure grid. The light settles to a brief pulse every 3 seconds in the band's role colour (blue left, red right, green labeler, white if no role is set) while it waits for the app.
+
+The computer app can run these steps for you from its device setup page; see the app's Wi-Fi guide.
+
+**If it fails** the screen says `WIFI FAILED` and the reason (`check password`, `network not found or 5 GHz`, or `join timed out`), the light blinks amber, and about 30 seconds later the band is back at `WIFI SETUP` with the same network name and password. Join it again and re-enter the details. The reasons and fixes are in [docs/device-reference.md](docs/device-reference.md#if-it-will-not-connect).
+
+### 3. Use it with the app
+
+Start the OpenMuscle app on a computer that is on the same Wi-Fi network. It finds the band by itself. The light turns steady **orange** while the app is receiving data. If it does not appear, see [If it will not connect](docs/device-reference.md#if-it-will-not-connect). Tap MENU on the band to see its address if the app asks for it.
+
+### 4. Everyday controls
+
+| Do this | What happens |
+|---|---|
+| Tap MENU | Status page: Wi-Fi, address, id, role. Tap again for battery and mode, again to return to the grid |
+| Tap SELECT | Pause or resume sending (Wi-Fi stays on) |
+| Hold MENU 2 s | Charge mode on or off (Wi-Fi off while charging) |
+| Hold SELECT 2 s | Record to the SD card on or off (needs a card) |
+| Hold MENU and SELECT 3 s | Forget the Wi-Fi and go back to `WIFI SETUP` |
+| BOOT | Restart the band |
+
+The complete tables of lights, screens and buttons are in [docs/device-reference.md](docs/device-reference.md).
+
+### 5. Moving to a different Wi-Fi
+
+Hold MENU and SELECT together for 3 seconds (the light blinks magenta, then the band restarts). The band returns to `WIFI SETUP` with the same name and password printed on its sticker. Repeat step 2.
+
+---
+
+## For people preparing kits
+
+[docs/kit-prep.md](docs/kit-prep.md) is a checklist: factory flash, first-boot check, reset-path test, roles, the pre-ship check, stickers, charge level and box contents.
+
+Short version of the tools it uses:
+
+```
+python flash.py --factory COM7        # erase, install MicroPython and the firmware, no Wi-Fi details
+python tools/kit_check.py COM8 --role left --label "Band A" --clear-logs
+python wipe.py COM8 --reset            # clear a used band without reflashing
+```
+
+`COM7` is the port a blank band shows (USB id `303a:1001`); `COM8` is the port of a band running MicroPython (`303a:4001`). Details are below and in [BRINGUP.md](BRINGUP.md).
+
+---
+
+## For developers
+
+### What this firmware does
+
+- Scans the 15 by 4 Velostat matrix every 20 ms by default (about 50 Hz; `scan_interval_ms`).
+- Reads the ICM-42688-P motion sensor and sends its readings with each frame.
+- Announces itself on the local Wi-Fi by mDNS (`_openmuscle._udp`) and a UDP broadcast beacon to port 3140. No hard-coded destination address.
+- Accepts subscriptions on a small command channel (TCP 8001) and unicasts each frame to every subscribed computer (data on UDP 3141; at most 4 subscribers, 5 s heartbeat timeout).
+- Logs sessions to microSD when asked (hold SELECT).
+- Shows its state on an RGB status light and a 128x32 screen.
+- BLE is planned for a later phase and is not in this firmware.
+
+### How V4 differs from V3
 
 | Subsystem | V3 | V4 |
 |---|---|---|
@@ -23,226 +109,135 @@ MicroPython firmware for the OpenMuscle FlexGrid V4 wearable sensor bracelet. ES
 | Display | OLED SSD1306 128x32 | OLED SSD1306 128x32 (unchanged) |
 | Storage | None | **microSD via SPI** (new) |
 | Status indication | OLED only | **3-channel RGB LED on GPIO 40/41/42** (new) |
-| IMU | Footprint only, never populated | **ICM-42688-P populated and active** (new) |
-| Network model | Hardcoded destination IP in firmware | **Discovery + subscribe** (new protocol) |
-| Bluetooth | None | **BLE GATT** (planned phase 4) |
-| Haptic motor | Footprint only | Driver populated but **defaults OFF**, opt-in only |
+| Motion sensor | Footprint only, never populated | **ICM-42688-P populated and active** (new) |
+| Network model | Hard-coded destination IP in firmware | **Discovery + subscribe** (new protocol) |
+| Haptic motor | Footprint only | Driver populated but **defaults off**, opt-in only |
 
-## Wi-Fi setup and recovery
+### Flashing
 
-A band with no Wi-Fi credentials boots into **setup mode**: it raises its own WPA2 network (`OM-flexgrid-<6hex>`, with a random per-device password) and serves a small provisioning API on `http://192.168.4.1`. The OLED shows everything needed to join it; nothing is truncated. The network name is longer than the 16-character screen, so it is split over two lines (read them as one name), and the password line starts with `PW `:
+The short route (full steps and the manual route are in [BRINGUP.md](BRINGUP.md)):
 
 ```
-WIFI SETUP        <- this top row rotates every 3 s:
-OM-flexgrid-         WIFI SETUP, "see guide", and after a
-d7af0b               failed join "LAST TRY FAILED" and the reason
-PW kd3mpq72xy
+pip install "esptool==4.8.1" "mpremote==1.25.0" pyserial
+python flash.py --factory COM7
 ```
 
-The LED blinks blue once a second while the band is in setup mode. If the OLED does not answer (a dead or unplugged display) the LED blinks blue twice in quick succession instead, because then nobody can read the password; see the LED guide below.
+`--factory` erases the board, installs MicroPython and the firmware, and pushes **no** `config/settings.json`. The band boots to `WIFI SETUP` with no file edits and no credentials. Without `--factory`, `flash.py` pushes your `config/settings.json` (copy `config/settings.example.json`; its Wi-Fi fields are blank, so it also boots to setup unless you fill them in). `config/settings.json` is ignored by git.
 
-Join that network from a phone or laptop, then open `http://192.168.4.1/` (a simple page) or `POST /provision` with `{"ssid": "...", "password": "..."}`. The band saves the credentials, reboots and joins your network. Use a **2.4 GHz** network: the radio cannot see 5 GHz, and sign-in pages (school, hotel or office) will not work.
+A re-flash erases the whole chip, so the band gets a **new device id** (`flexgrid-<6hex>`) and a **new setup password**. A band you flashed earlier shows up as a different device.
+
+### Clearing a used band
+
+`python wipe.py <runtime_com> [--reset]` deletes `config/settings.json`, `log.txt` and `log.txt.bak` over the serial port without reflashing. The next boot mints a new device id and setup password and shows `WIFI SETUP`. Wipe before handing a band to someone else; the log can contain the network name that was used.
+
+### Pre-ship check
+
+`python tools/kit_check.py <runtime_com>` reads a band over USB (it needs `mpremote`) and says PASS or FAIL. It checks that the band is in **factory state** (no Wi-Fi name or password saved, no join history, no `log.txt.bak`, no line in `log.txt` naming a Wi-Fi network), that the screen answers at I2C address 0x3C, that the battery is at least 3.7 V, that the band has a well-formed setup password, and that every firmware file on the band is byte-identical to this checkout. The Wi-Fi password is never read back to the PC.
+
+On PASS it prints the sticker text: id, setup network name, setup password, and the role and label if set.
+
+Options: `--role left|right|labeler` and `--label TEXT` write those settings first; `--clear-logs` deletes `log.txt` and `log.txt.bak`; `--require-sd` and `--require-tag` turn the SD-card and "checkout is on a git tag" warnings into failures; `--min-battery V` changes the 3.7 V floor; `--reset` reboots the band afterwards. Exit status: 0 PASS, 1 FAIL, 2 the band could not be reached.
 
 ### What the band does when the first join fails
 
-Right after provisioning the band tries to join for `sta_join_timeout_s` seconds (default 20). If that very first join fails it does not retry forever:
+Right after provisioning the band tries to join for `sta_join_timeout_s` seconds (default 20). If that very first join fails it does not retry for ever:
 
 | Step | What happens |
 |---|---|
-| Joining | OLED: the boot screen with `Joining Wi-Fi...` and your network name. LED: blue, steady. |
-| Failed | OLED `WIFI FAILED`, the reason and `back to setup` for about 2 s, LED fast amber blink. The Wi-Fi password is cleared, the network name is kept as `last_ssid`, then the band reboots. |
-| Back in setup mode | Same `OM-flexgrid-<6hex>` name and same `PW` as before. The top row of the OLED adds `LAST TRY FAILED` and the reason to its rotation. `GET /info` reports `last_wifi_error` and `last_ssid`. About 30 s pass between the reboot after provisioning and the band being back in setup mode. |
-| Joined | LED: green, steady, for 2 s. OLED: the status page (`WIFI OK` and the band's IP address) for 15 s, then the heatmap. `wifi_joined_ok` becomes true. From now on a failed join (router off, out of range) never clears the credentials; the radio keeps retrying and the band reconnects when the router returns. |
+| Joining | Screen: boot screen with `Joining Wi-Fi...` and your network name. Light: blue, steady. |
+| Failed | Screen: `WIFI FAILED`, the reason, `back to setup` for about 2 s. Light: fast amber blink. The Wi-Fi password is cleared, the network name is kept as `last_ssid`, then the band reboots. |
+| Back in setup mode | Same `OM-flexgrid-<6hex>` name and same `PW` as before. The top line of the screen adds `LAST TRY FAILED` and the reason to its rotation. `GET /info` reports `last_wifi_error` and `last_ssid`. About 30 s pass between the reboot after provisioning and the band being back in setup mode. |
+| Joined | Light: green, steady, for 2 s. Screen: the status page (`WIFI OK` and the band's IP address) for 15 s, then the grid. `wifi_joined_ok` becomes true. From now on a failed join (router off, out of range) never clears the credentials; the radio keeps retrying. |
 
-`last_wifi_error` values:
-
-| Value | OLED text | Usual cause |
-|---|---|---|
-| `wrong_password` | `check password` | typo in the password |
-| `no_ap_found` | `network not found or 5 GHz` | misspelled name, out of range, or a 5 GHz-only network |
-| `timeout` | `join timed out` | the router never answered |
-
-A band that has never joined and is provisioned while its router is off will also land back in setup mode; enter the credentials again once the router is up. `POST /provision`, `POST /reprovision` and the MENU+SELECT wipe all reset `wifi_joined_ok` to false.
+`last_wifi_error` values: `wrong_password` (screen `check password`), `no_ap_found` (`network not found or 5 GHz`), `timeout` (`join timed out`). `POST /provision`, `POST /reprovision` and the MENU + SELECT wipe all reset `wifi_joined_ok` to false.
 
 ### Provisioning HTTP details
 
-The setup server reads the request properly: headers up to the blank line, then exactly `Content-Length` bytes, within 3 seconds. A client that sends headers and body in separate TCP segments works. The SSID is limited to 32 bytes and the password to 8..63 bytes (UTF-8 bytes, not characters), and both are stored exactly as sent, with no whitespace stripping.
+The setup server (`http://192.168.4.1`, WPA2 network `OM-flexgrid-<6hex>`, channel 1, up to 4 clients) reads the request properly: headers up to the blank line, then exactly `Content-Length` bytes, within 3 seconds. `GET /` is a small web form, `GET /info` returns the band's identity as JSON, and `POST /provision` takes `{"ssid": "...", "password": "..."}`. The SSID is limited to 32 bytes and the password to 8..63 bytes (UTF-8 bytes, not characters; an empty password means an open network), and both are stored exactly as sent. `POST /reprovision` also works on a joined band (on its LAN address): it clears the Wi-Fi settings, mints a new setup password and restarts.
 
 | Status | `data.message` | Meaning |
 |---|---|---|
 | 400 | `ssid_length_invalid (1..32 bytes)` | empty, blank, not a string, or over 32 bytes |
-| 400 | `password_length_invalid (8..63 bytes for WPA2, or empty)` | wrong length (empty means an open network) |
+| 400 | `password_length_invalid (8..63 bytes for WPA2, or empty)` | wrong length |
 | 400 | `invalid_json: ...` | body is not a JSON object |
 | 400 | `incomplete_body` | fewer bytes arrived than `Content-Length` promised |
 | 400 | `bad_content_length` | `Content-Length` is not a number |
 | 413 | `request_too_large` | body over 2048 bytes or headers over 4096 bytes |
 
-## What the band shows (OLED and LED)
+### Settings
 
-The OLED is **128x32**: four lines of 16 characters, and the heatmap is the full 15 x 4 grid at 8 pixels per cell. Every screen below is written for four lines. A 128x64 panel works too: set `"display_height": 64` in `config/settings.json` and the text screens use eight lines.
-
-### Screens
-
-| Screen | When | Lines |
-|---|---|---|
-| Boot | power-up, while joining | `OpenMuscle V4` / device id / `Joining Wi-Fi...` / your network name |
-| Setup | no Wi-Fi saved | top row rotates `WIFI SETUP`, `see guide`, failure reason; then the network name over two lines and `PW <password>` |
-| Join failed | first join did not work | `WIFI FAILED` / the reason (one or two lines) / `back to setup` |
-| Status page 1 | MENU tap, and 15 s after joining | `WIFI OK` / **IP address** / device id / role (`role: left`, or `no role set`) |
-| Status page 2 | second MENU tap | battery (`BAT 87% 3.95V`, or `LOW 12% 3.42V`) / `MODE STREAM` / `HUBS 1` / `NET <your network>` |
-| Heatmap | normal running | the live 15 x 4 pressure grid |
-| Paused | tap SELECT | `PAUSED` / `Wi-Fi is on` / `not streaming` / `SELECT to resume` |
-| Charging | hold MENU 2 s, or USB plugged in and idle | `CHARGING` / `Wi-Fi off` / `unplug to resume` / `or tap SELECT` |
-| Recording | hold SELECT 2 s (SD card needed) | `RECORDING` / `to SD, Wi-Fi OFF` / `tap SELECT to` / `stop & reconnect` |
-| Notices (3 to 4 s) | something refused or low | `NO SD CARD`, `RECORD OFF`, `LOW BATTERY` |
-
-If Wi-Fi is down the first status page reads `WIFI LOST / retrying...`; in CHARGE and RECORD it reads `WIFI OFF`. The page cycle is heatmap, page 1, page 2, heatmap; each page also times out after 15 s. A MENU tap is a short press; holding MENU for 2 s still switches CHARGE on and off.
-
-### LED guide
-
-One table for every state the LED can show.
-
-| LED | Meaning | Palette name |
-|---|---|---|
-| Blue, one blink per second | **Setup mode**: read the OLED, join the band's own network | `setup` |
-| Blue, two quick blinks then a pause | Setup mode but the **OLED is not answering** (service needed) | `setup_no_oled` |
-| Blue, steady | **Joining** your Wi-Fi | `joining` |
-| Green, steady for 2 s | **Joined** (also each time Wi-Fi comes back); then the idle pulse | `joined` |
-| Amber, fast blink | First join **failed**; the band is going back to setup | `join_failed` |
-| Red, fast blink | Recovered from a crash (watchdog), for the first minute | `fault` |
-| Magenta, blinking | MENU + SELECT held: letting go now **wipes the Wi-Fi settings** | `ap_provisioning` |
-| Purple, pulsing | MENU held 2 s: letting go switches CHARGE; also CHARGE while charging | `charging` |
-| Purple, steady | CHARGE and the battery is full | `charge_full` |
-| Green, slow breathing | RECORD (and the preview while SELECT is held 2 s) | `record` |
-| Cyan, slow breathing | PAUSED (standby) | `standby` |
-| Amber, one blink per second | **Low battery** (under 3.55 V, USB not plugged in) | `low_battery` |
-| Amber, slow pulse | **Wi-Fi lost**; the band keeps retrying | `wifi_lost` |
-| Orange, steady | Streaming to a hub | `streaming` |
-| Orange with a cyan flash every 5 s | Streaming while USB is plugged in | `streaming_on_usb` |
-| Short pulse every 3 s | Waiting for a hub; colour is the **role**: blue left, red right, green labeler, white not set | `idle_left`, `idle_right`, `idle_labeler`, `idle_unassigned` |
-
-The first rows are the start-up story in order: blue blink (setup), blue steady (joining), green (joined), then the idle pulse in the role colour. The three amber states differ by pattern: fast blink (join failed), one blink a second (low battery), slow pulse (Wi-Fi lost).
-
-## Buttons and power modes
-
-| Control | Action |
-|---|---|
-| Tap MENU | Show the status page (IP address, Wi-Fi, battery, id, role); tap again for the next page, then the heatmap |
-| Tap SELECT | Toggle PAUSED (standby): Wi-Fi stays on, streaming stops |
-| Hold MENU 2 s | Toggle CHARGE: Wi-Fi radio off, CPU 80 MHz. Leaving CHARGE reboots the band |
-| Hold SELECT 2 s | Start RECORD (SD logging, Wi-Fi off). Tap SELECT to stop; the band reboots back onto Wi-Fi |
-| Hold MENU + SELECT 3 s | Forget Wi-Fi and return to setup mode |
-
-Every mode other than streaming replaces the heatmap on the OLED with a banner (`PAUSED`, `CHARGING`, `RECORDING`) that says whether Wi-Fi is on and how to get out. If you let go of one button of a MENU + SELECT hold before the 3 s are up, nothing happens: the other button is ignored until both are released.
-
-RECORD cannot cost you your Wi-Fi by accident. It only starts once the SD card has mounted and a session file is open. With no card the band stays on Wi-Fi and streaming and shows `NO SD CARD / Record needs one / Wi-Fi stays on` for 3 seconds. Set `"record_enabled": false` in `config/settings.json` to disable the SELECT hold entirely.
-
-CHARGE also starts by itself when USB is present and no hub has been subscribed for `auto_charge_idle_s` seconds (default 300; it used to be 30). Set it to `0` to turn the automatic switch off and use the MENU hold only.
-
-## Settings added for setup, recovery and status
+Set these in `config/settings.json` (a missing key takes its default; see `lib/settings_manager.py` for the full list).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `wifi_joined_ok` | `false` | set after the first successful join; while false a failed join returns the band to setup mode |
-| `last_wifi_error` | `""` | why the last first-join attempt failed (see table above) |
-| `last_ssid` | `""` | the network that attempt used |
+| `wifi_ssid`, `wifi_password` | empty | empty means "not set up": the band boots to setup mode |
+| `role` | empty | `left`, `right` or `labeler`; sets the idle light colour (`kit_check --role` or the app sets it) |
+| `device_label` | empty | free text for the sticker, set by `tools/kit_check.py --label` |
+| `scan_interval_ms` | `20` | sensor scan period |
 | `sta_join_timeout_s` | `20` | seconds to wait for the join (clamped to 5..60) |
 | `record_enabled` | `true` | allow the SELECT-hold RECORD mode |
-| `auto_charge_idle_s` | `300` | idle seconds on USB before auto-CHARGE; `0` disables |
-| `display_height` | `32` | OLED height in pixels: `32` (shipped 128x32) or `64` |
-| `low_battery_v` | `3.55` | volts under which the LED blinks amber and the OLED warns (USB unplugged) |
-| `device_label` | `""` | free text for the sticker, set by `tools/kit_check.py --label` |
+| `auto_charge_idle_s` | `300` | idle seconds on USB before automatic charge mode; `0` disables |
+| `display_height` | `32` | screen height in pixels: `32` (the shipped 128x32) or `64` |
+| `low_battery_v` | `3.55` | volts under which the light blinks amber and the screen warns (USB not detected) |
+| `vbus_stat_pin` | none | GPIO of a real USB-detect line; set to `39` only on V4.2 boards, where it is wired |
+| `wifi_joined_ok`, `last_wifi_error`, `last_ssid` | | kept by the firmware; do not set by hand |
 
-The first three are maintained by the firmware; do not set them by hand.
+### Tests
 
-## Factory flashing and wiping
-
-`python flash.py --factory <bootloader_com>` erases the board, installs MicroPython and the firmware, and pushes **no** `config/settings.json`. The band boots to `WIFI SETUP` with no file edits. Without `--factory`, `flash.py` pushes your `config/settings.json` (copy `config/settings.example.json`; its Wi-Fi fields are blank, so it also boots to setup unless you fill them in).
-
-A re-flash erases the whole chip, so the band gets a **new device id** (`flexgrid-<6hex>`) and a **new setup password**. A band you flashed earlier will show up as a different device.
-
-`python wipe.py <runtime_com>` clears a used band without re-flashing: it deletes `config/settings.json`, `log.txt` and `log.txt.bak` over the serial port (use `--reset` to reboot it afterwards). The next boot mints a new device id and setup password and shows `WIFI SETUP`. Wipe before handing a band to someone else; the log can contain the network name that was used.
-
-## Pre-ship check
-
-`python tools/kit_check.py <runtime_com>` reads a band over USB (it needs `mpremote`) and says PASS or FAIL. It checks that the band is in **factory state** (no Wi-Fi name or password saved, no join history, no `log.txt.bak`, no line in `log.txt` naming a Wi-Fi network), that the OLED answers at 0x3C, that the battery is at least 3.7 V, that the band has a well-formed setup password, and that every firmware file on the band is byte-identical to this checkout. A `log.txt` that holds only boot lines from the band's own setup network is fine. The Wi-Fi password is never read back to the PC.
-
-On PASS it prints the sticker text: device id, setup network name, setup password, and the role and label if set.
-
-```
-python tools/kit_check.py COM7 --role left --label "Band A" --clear-logs
-```
-
-`--role left|right|labeler` and `--label` write those settings first; `--clear-logs` deletes `log.txt` and `log.txt.bak`; `--require-sd` and `--require-tag` turn the SD card and "this checkout is exactly on a git tag" warnings into failures; `--min-battery V` changes the 3.7 V floor; `--reset` reboots the band afterwards. Exit status is 0 for PASS, 1 for FAIL, 2 when the band could not be reached. A reboot after the check makes a fresh `log.txt` that only holds the band's own boot lines, which still passes.
-
-## Tests
-
-The Wi-Fi fallback, the provisioning HTTP handler, the power-mode guards, the LED state table, the OLED screens and the flashing and pre-ship tools are covered by desktop tests that stub out the MicroPython modules. They need only Python 3 (no board, no network):
+The Wi-Fi fallback, the provisioning HTTP handler, the power-mode guards, the LED state table, the screens, the flashing and pre-ship tools and the documentation are covered by desktop tests that stub out the MicroPython modules. They need only Python 3 (no board, no network):
 
 ```
 python -m unittest discover -s tests
 ```
 
-(`python -m pytest tests` works too if pytest is installed.) Set `OM_PROVISIONING_PATH` to another copy of the provisioning module, for example the LASK5 `om_provisioning.py`, to run the same HTTP checks against it.
+(`python -m pytest tests` works too if pytest is installed.) Set `OM_PROVISIONING_PATH` to another copy of the provisioning module, for example the LASK5 one, to run the same HTTP checks against it.
 
-## Repo layout
+### Repo layout
 
 ```
 FlexGridV4-Firmware/
 ├── README.md
+├── BRINGUP.md                    (flashing and bring-up steps)
 ├── LICENSE                       (MIT, OpenMuscle)
+├── docs/
+│   ├── device-reference.md       (lights, screens, buttons, power; one-page quick card)
+│   └── kit-prep.md               (checklist for preparing bands to ship)
 ├── boot.py                       (boot sequence, sys.path setup)
 ├── main.py                       (entry point)
 ├── flexgrid.py                   (main loop, wires the subsystems together)
-├── flash.py                      (erase + flash + push; --factory for a blank-credentials unit)
+├── flash.py                      (erase + flash + push; --factory for a no-credentials band)
 ├── wipe.py                       (clear settings.json and logs on a used band)
-├── tools/kit_check.py            (pre-ship check: factory state, OLED, battery, firmware, sticker text)
+├── tools/kit_check.py            (pre-ship check: factory state, screen, battery, firmware, sticker text)
 ├── config/settings.example.json  (template; blank Wi-Fi credentials)
 ├── tests/                        (desktop unit tests, run with unittest)
 └── lib/
     ├── pinmap.py                 (V4 GPIO assignments)
-    ├── settings_manager.py       (NVS-backed settings + device UUID)
+    ├── settings_manager.py       (settings + device id)
     ├── logger.py                 (persistent log to flash)
-    ├── power_manager.py          (battery, charger, MAX16054 soft power)
+    ├── power_manager.py          (battery, USB guess, MAX16054 soft power)
     ├── sensor_matrix.py          (15x4 Velostat scan, mux driver)
     ├── display_manager.py        (OLED SSD1306)
-    ├── screens.py                (OLED text layouts: setup, join failure, mode banners)
-    ├── provisioning.py           (setup-mode Wi-Fi AP + HTTP provisioning API)
-    ├── menu_manager.py           (boot/select/menu buttons)
-    ├── status_led.py             (NEW: RGB LED PWM control + state palette)
-    ├── imu.py                    (NEW: ICM-42688-P read)
-    ├── sd_logger.py              (NEW: microSD session recording)
-    ├── discovery.py              (NEW: mDNS + UDP broadcast announce)
-    ├── subscribers.py            (NEW: subscriber list + heartbeat)
-    ├── commands.py               (NEW: command channel decode/dispatch)
-    ├── network_manager.py        (REWRITTEN: Wi-Fi + new protocol send/receive)
-    └── ble.py                    (PHASE 4: BLE GATT service + advertising)
+    ├── ssd1306.py                (OLED driver from micropython-lib)
+    ├── screens.py                (text layouts: setup, join failure, status, mode banners)
+    ├── provisioning.py           (setup-mode Wi-Fi network + HTTP provisioning API)
+    ├── menu_manager.py           (retired on-screen menu; not started)
+    ├── status_led.py             (RGB LED PWM control + state palette)
+    ├── imu.py                    (ICM-42688-P read)
+    ├── sd_logger.py              (microSD session recording)
+    ├── discovery.py              (mDNS + UDP broadcast announce)
+    ├── subscribers.py            (subscriber list + heartbeat)
+    ├── commands.py               (command channel decode/dispatch)
+    └── network_manager.py        (Wi-Fi + protocol send/receive)
 ```
 
-## Protocol summary
+### Protocol summary
 
 Implements the OpenMuscle v1.0 protocol per the canonical specs:
 - Discovery + transport spec: [`OpenMuscle-Connect/docs/DEVICE-DISCOVERY-SPEC.md`](https://github.com/Open-Muscle/OpenMuscle-Connect/blob/main/docs/DEVICE-DISCOVERY-SPEC.md)
 - Wire format: [`OpenMuscle-Connect/docs/WIRE-FORMAT.md`](https://github.com/Open-Muscle/OpenMuscle-Connect/blob/main/docs/WIRE-FORMAT.md)
 
-Announce payload (mDNS TXT + UDP broadcast JSON):
-```json
-{
-  "v": "1.0",
-  "type": "announce",
-  "id": "flexgrid-<6hex>",
-  "role": "source",
-  "dev": "flexgrid",
-  "fw": "v4.0.0",
-  "transports": ["wifi"],
-  "caps": ["sensor", "status", "cmd", "imu"],
-  "matrix": [15, 4],
-  "services": { "sensor": 3141, "cmd": 8001 }
-}
-```
+Announce (mDNS TXT keys and the UDP broadcast JSON to port 3140) carries, among other fields, the band's id (`flexgrid-<6hex>`), `dev`, `fw`, `caps`, the matrix size `[15, 4]` and the service ports (`sensor` 3141, `cmd` 8001). See `lib/discovery.py` for the exact payload.
 
-In phase 4, `transports` becomes `["wifi","ble"]` and a BLE GATT service appears in advertisements.
-
-## License
+## Licence
 
 MIT. See `LICENSE`.
