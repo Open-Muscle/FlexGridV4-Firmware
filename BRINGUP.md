@@ -55,7 +55,7 @@ python flash.py --factory COM7
 
 **`--factory` pushes no `config/settings.json`, and none is needed in your checkout.** The erase already cleared the chip, so the band starts with no Wi-Fi details, makes a new id and setup password, and starts setup mode within a few seconds.
 
-**Kit bands have no screen** (its header is left unplugged), and the firmware carries on without it (it logs `No screen`). The light blinks blue, **two quick blinks then a pause**: that is the normal setup pattern for a band without a screen, not a fault. Read the setup network name and password with `python tools/kit_check.py <port>`; it prints them as the sticker text. The sticker is the only place the password is shown, so print one for every band.
+**Kit bands have no screen** (its header is left unplugged), and the firmware carries on without it (it logs `No screen`). The light blinks blue, **two quick blinks then a pause**: that is the normal setup pattern for a band without a screen, not a fault. Read the setup network name and password with `python tools/kit_check.py <port>`; it prints them as the sticker text on a PASS, and still prints them (marked read only, not for a sticker) when the check FAILs, for example while the battery is low or after the band has joined a network. The sticker is the only place the password is shown, so print one for every band.
 
 A band that does have a screen blinks its light blue once a second and shows this:
 

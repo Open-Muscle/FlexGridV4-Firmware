@@ -66,7 +66,7 @@ Print this page or copy the boxes. One pass per band; the band's id (`flexgrid-`
   python tools/kit_check.py COM8
   ```
 
-  `COM8` is the runtime port. The `Sticker text` block at the end names the setup Wi-Fi (`OM-flexgrid-` plus six characters) and the 10 character setup password. Keep this window open for step D. The line `[warn] OLED: not fitted` is expected (see step E).
+  `COM8` is the runtime port. The `Sticker text` block at the end names the setup Wi-Fi (`OM-flexgrid-` plus six characters) and the 10 character setup password. Keep this window open for step D. The line `[warn] OLED: not fitted` is expected (see step E). A `[FAIL]` on battery at this point only means the band needs charging first: the tool still prints the setup name and password under "Setup name and password (read only ...)" (it appears whenever the band holds a valid password, even on FAIL), so you can read them now. That block is not sticker text; print the sticker only from a PASS.
 
 ### D. Hardware and reset-path tests (uses your test Wi-Fi)
 

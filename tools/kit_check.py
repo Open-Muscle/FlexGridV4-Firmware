@@ -3,7 +3,9 @@
 Reads the band's settings, log files, I2C bus, battery and firmware files,
 decides whether it is in FACTORY STATE (ready to hand to someone who will give
 it their own Wi-Fi), and prints either FAIL with the reasons or PASS with the
-text for the band's sticker.
+text for the band's sticker. On FAIL it still prints the setup name and
+password (clearly marked as read only, not sticker text) when the band has a
+well-formed one, because a band without a screen shows them nowhere else.
 
 Usage:
     python tools/kit_check.py <runtime_com> [options]
@@ -514,6 +516,17 @@ def run_check(opts, runner=mpremote_exec, expected=None, tag_info=None, out=prin
     failures = [i for i in items if i[0] == "fail"]
     if failures:
         out("FAIL ({} problem{})".format(len(failures), "" if len(failures) == 1 else "s"))
+        psk = report.get("psk") or ""
+        if len(psk) == PSK_LENGTH and set(psk) <= set(PSK_CHARSET):
+            # A screenless band has no other way to show its password, so a
+            # band that is still charging or has already joined a network
+            # must stay readable. This is NOT sticker text.
+            out("")
+            out("Setup name and password (read only; this band FAILED the check, "
+                "do not print a sticker from it):")
+            dev = report.get("device_id") or ""
+            out("  Setup Wi-Fi      " + ap_name(report.get("device_type"), dev))
+            out("  Setup password   " + psk)
         status = 1
     else:
         out("PASS")

@@ -226,7 +226,22 @@ class RunCheckTests(unittest.TestCase):
         self.assertIn("FAIL (2 problems)", text)
         self.assertIn("not in factory state", text)
         self.assertNotIn("Sticker text", text)
-        self.assertNotIn(GOOD_PSK, text)
+        # the setup name and password are still readable, marked as not for a sticker
+        self.assertIn("this band FAILED the check", text)
+        self.assertIn("Setup Wi-Fi      OM-flexgrid-d7af0b", text)
+        self.assertIn("Setup password   " + GOOD_PSK, text)
+
+    def test_fail_without_a_usable_password_prints_no_setup_block(self):
+        rc, text, _b = self.run_it(["COM5"], good_report(psk=""))
+        self.assertEqual(rc, 1)
+        self.assertNotIn("Setup password   ", text)
+        self.assertNotIn("Sticker text", text)
+
+    def test_low_battery_fail_still_shows_the_setup_password(self):
+        rc, text, _b = self.run_it(["COM5"], good_report(vbat=3.2))
+        self.assertEqual(rc, 1)
+        self.assertNotIn("Sticker text", text)
+        self.assertIn("Setup password   " + GOOD_PSK, text)
 
     def test_role_label_and_clear_run_before_the_check(self):
         rc, text, band = self.run_it(["COM5", "--role", "left", "--label", "Band A", "--clear-logs"],
