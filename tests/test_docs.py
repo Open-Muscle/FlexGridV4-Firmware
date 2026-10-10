@@ -282,8 +282,9 @@ class TestKitPrep(unittest.TestCase):
                        "no readable settings file", "not on a git tag"):
             self.assertIn(quoted, src, quoted)
         text = doc("kit-prep")
-        for quoted in ("not in factory state", "OLED not found at 0x3C", "no battery detected",
-                       "differs from this checkout", "no readable settings file"):
+        for quoted in ("not in factory state", "OLED: not fitted", "not found at 0x3C",
+                       "no battery detected", "differs from this checkout",
+                       "no readable settings file"):
             self.assertIn(quoted, text, quoted)
 
     def test_names_no_site_or_person(self):
@@ -461,9 +462,79 @@ class TestReferenceMatchesFirmware(unittest.TestCase):
     def test_every_open_hardware_question_is_listed(self):
         block = self.ref.split("## Facts still to confirm on a physical band")[1].split("## Where each fact")[0]
         items = re.findall(r"^\d+\.\s+\*\*(.*?)\*\*", block, re.M)
-        for needed in ("Power button.", "Switches fitted.", "Screen.", "CHRG light.", "Charging.",
-                       "SD socket."):
+        for needed in ("Power button feel.", "CHRG light.", "Charging.", "SD socket.",
+                       "Light visibility.", "Tap and hold feel."):
             self.assertIn(needed, items, needed)
+        # settled from the schematic and the board, so no longer open
+        for settled in ("Power button.", "Switches fitted.", "Screen.",
+                        "Download mode on a blank or stuck board."):
+            self.assertNotIn(settled, items, settled)
+
+
+class TestNoScreenKit(unittest.TestCase):
+    """Kit bands ship without the screen; every document offers the no-screen path."""
+
+    def test_reference_says_kit_bands_have_no_screen_and_use_the_sticker(self):
+        ref = doc("device-reference")
+        self.assertIn("Kit bands have no screen", ref)
+        self.assertIn("sticker", ref.split("## Contents")[0])
+        setup = section(ref, "Setup mode and getting back to it")
+        self.assertIn("without a screen", setup.lower())
+        self.assertIn("Setup password", setup)
+        self.assertIn("two quick blinks", setup)
+
+    def test_two_blink_light_is_normal_not_a_fault(self):
+        ref = doc("device-reference")
+        row = [ln for ln in ref.splitlines() if "`setup_no_oled`" in ln]
+        self.assertEqual(len(row), 1)
+        self.assertIn("normal", row[0])
+        self.assertNotIn("repair", ref.lower())
+        self.assertNotIn("did not answer", row[0])
+        self.assertIn("sticker", row[0])
+
+    def test_quick_card_first_time_steps_use_the_sticker(self):
+        card = doc("device-reference").split("## Quick card (print this section)")[1].split("\n---\n")[0]
+        self.assertIn("sticker", card)
+        self.assertIn("two quick blinks then a pause", card)
+        self.assertIn("Power button", card)
+
+    def test_switch_table_matches_the_board(self):
+        ref = doc("device-reference")
+        buttons = section(ref, "Buttons")
+        for text in ("SW_PWR1", "MAX16054", "BOOT1", "SW_RST1", "IO0", "download mode",
+                     "MENU1", "SELECT1", "Short press"):
+            self.assertIn(text, buttons, text)
+        self.assertIn("D2", ref)
+        self.assertIn("CHRG LED", ref)
+
+    def test_kit_prep_makes_the_sticker_mandatory(self):
+        kp = doc("kit-prep")
+        self.assertIn("ship without the small screen", kp)
+        self.assertIn("mandatory", kp)
+        self.assertIn("only place", kp)
+        self.assertIn("two quick blinks", kp)
+
+    def test_readme_and_bringup_offer_the_no_screen_path(self):
+        for name in ("README.md", "BRINGUP.md"):
+            text = doc(name)
+            self.assertIn("no screen", text.lower(), name)
+            self.assertIn("sticker", text, name)
+            self.assertIn("two quick blinks", text, name)
+
+    def test_pinmap_comment_names_the_strap_switch(self):
+        pm = read(os.path.join(ROOT, "lib", "pinmap.py"))
+        self.assertNotIn("GPIO0 has no button", pm)
+        for text in ("SW_RST1", "IO0", "boot-strap", "must NOT read it"):
+            self.assertIn(text, pm, text)
+        # and the firmware really does not use GPIO0
+        self.assertNotRegex(pm, r"(?m)^BTN_BOOT\s*=")
+        self.assertNotRegex(pm, r"(?m)^\w+\s*=\s*0\s*(#.*)?$")
+
+    def test_missing_screen_is_not_logged_as_an_error(self):
+        for rel in ("flexgrid.py", os.path.join("lib", "display_manager.py")):
+            src = read(os.path.join(ROOT, rel))
+            self.assertNotIn("logger.error(\"Setup mode but the OLED", src, rel)
+            self.assertNotIn("SSD1306 init failed", src, rel)
 
 
 class TestQuickCard(unittest.TestCase):
