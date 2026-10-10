@@ -72,12 +72,27 @@ class EvaluateTests(unittest.TestCase):
         good = self.ev({"log": {"present": True, "bytes": 300, "net_lines": 0}})
         self.assertEqual(levels(good)["factory state"], "ok")
 
-    def test_missing_oled_fails_readably(self):
+    def test_missing_screen_is_a_warning_by_default(self):
+        # Kit bands ship without the screen, so a missing OLED must not fail.
         items = self.ev({"i2c": [0x68]})
+        self.assertEqual(levels(items)["OLED"], "warn")
+        self.assertNotIn("fail", {lvl for lvl, _t, _m in items})
+        msg = [m for _l, t, m in items if t == "OLED"][0]
+        self.assertIn("not fitted", msg)
+        self.assertIn("0x3C", msg)
+        self.assertIn("sticker is the only place the setup password lives", msg)
+        self.assertIn("normal", msg)
+
+    def test_require_screen_makes_a_missing_screen_fail(self):
+        items = self.ev({"i2c": [0x68]}, {"require_screen": True})
         self.assertEqual(levels(items)["OLED"], "fail")
         msg = [m for _l, t, m in items if t == "OLED"][0]
-        self.assertIn("0x3C", msg)
-        self.assertIn("setup password", msg)
+        self.assertIn("not found at 0x3C", msg)
+        self.assertIn("--require-screen", msg)
+        # a screen that does answer is fine either way
+        self.assertEqual(levels(self.ev({}, {"require_screen": True}))["OLED"], "ok")
+
+    def test_a_dead_i2c_bus_still_fails(self):
         self.assertEqual(levels(self.ev({"i2c": None}))["OLED"], "fail")
 
     def test_missing_imu_only_warns(self):
@@ -138,9 +153,12 @@ class StickerTests(unittest.TestCase):
 class ArgTests(unittest.TestCase):
     def test_parse(self):
         o = kit_check.parse_args(["COM5", "--role", "left", "--label", "Band A", "--clear-logs",
-                                  "--min-battery", "3.8", "--require-sd", "--require-tag", "--reset"])
+                                  "--min-battery", "3.8", "--require-sd", "--require-tag", "--reset",
+                                  "--require-screen"])
         self.assertEqual((o["port"], o["role"], o["label"], o["min_battery"]), ("COM5", "left", "Band A", 3.8))
         self.assertTrue(o["clear_logs"] and o["require_sd"] and o["require_tag"] and o["reset"])
+        self.assertTrue(o["require_screen"])
+        self.assertFalse(kit_check.parse_args(["COM5"])["require_screen"])
 
     def test_bad_arguments(self):
         for argv in ([], ["COM5", "COM6"], ["COM5", "--role", "arm"], ["COM5", "--label", "x" * 17],
@@ -189,8 +207,21 @@ class RunCheckTests(unittest.TestCase):
         self.assertIn("OM-flexgrid-d7af0b", text)
         self.assertIn(GOOD_PSK, text)
 
+    def test_band_without_a_screen_passes_and_prints_the_sticker(self):
+        rc, text, _b = self.run_it(["COM5"], good_report(i2c=[0x68]))
+        self.assertEqual(rc, 0)
+        self.assertIn("[warn] OLED: not fitted", text)
+        self.assertIn("PASS", text)
+        self.assertIn("Sticker text:", text)
+        self.assertIn(GOOD_PSK, text)
+
+    def test_require_screen_fails_a_band_without_one(self):
+        rc, text, _b = self.run_it(["COM5", "--require-screen"], good_report(i2c=[0x68]))
+        self.assertEqual(rc, 1)
+        self.assertNotIn("Sticker text", text)
+
     def test_fail_prints_reasons_and_no_sticker(self):
-        rc, text, _b = self.run_it(["COM5"], good_report(has_ssid=True, i2c=[0x68]))
+        rc, text, _b = self.run_it(["COM5"], good_report(has_ssid=True, i2c=None))
         self.assertEqual(rc, 1)
         self.assertIn("FAIL (2 problems)", text)
         self.assertIn("not in factory state", text)
