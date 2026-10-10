@@ -235,3 +235,19 @@ class KitCheckImuAddressesTest(unittest.TestCase):
         driver = set(imu._INV_ADDRS) | set(imu._TKM_ADDRS) | set(imu._BMI_ADDRS)
         self.assertTrue(driver <= set(kit_check.IMU_ADDRS),
                         sorted(driver - set(kit_check.IMU_ADDRS)))
+
+
+class PushFeedsWatchdogTest(unittest.TestCase):
+    """Pushing onto a board that already runs the app must feed its watchdog
+    between files, without importing the app on a blank board."""
+
+    def test_feed_snippet_runs_once_per_file_and_never_imports_the_app(self):
+        execs = []
+        fake = mock.MagicMock()
+        with mock.patch.object(flash.serial, "Serial", return_value=fake),              mock.patch.object(flash, "_enter_raw_repl"),              mock.patch.object(flash, "_push_file_raw"),              mock.patch.object(flash, "_exec_raw",
+                               side_effect=lambda s, code: (execs.append(code), (b"", b""))[1]):
+            flash.push_files_raw("COMX", [("a.py", "a.py"), ("lib/b.py", "lib/b.py")])
+        feeds = [c for c in execs if "sys.modules.get('flexgrid')" in c]
+        self.assertEqual(len(feeds), 2)
+        for c in feeds:
+            self.assertNotIn("import flexgrid", c)

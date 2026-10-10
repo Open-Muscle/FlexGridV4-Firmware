@@ -280,6 +280,26 @@ def _push_file_raw(s, local_abs, remote):
         raise SystemExit("size mismatch on {}: {} != {}".format(remote, out.strip(), len(data)))
 
 
+
+# A board that already runs the app has a 30 s hardware watchdog armed
+# (flexgrid.WDT_TIMEOUT_MS) that nothing feeds once the app is interrupted
+# for the raw-REPL push, so a push longer than that reboots the board mid-file
+# and the CDC port vanishes. Feed it between files when the app module is
+# already imported; on a freshly erased board nothing is imported and this is
+# a no-op (never import flexgrid here: that would start the hardware init).
+FEED_WDT_SNIPPET = chr(10).join([
+    "import sys",
+    "_m=sys.modules.get('flexgrid')",
+    "if _m is not None and hasattr(_m,'_feed_wdt'): _m._feed_wdt()",
+]) + chr(10)
+
+
+def _feed_running_wdt(s):
+    try:
+        _exec_raw(s, FEED_WDT_SNIPPET)
+    except Exception:
+        pass
+
 def push_files_raw(runtime_com, files_to_push):
     """Open one serial handle and push every file over raw REPL, then reset."""
     if serial is None:
@@ -294,6 +314,7 @@ def push_files_raw(runtime_com, files_to_push):
         _enter_raw_repl(s)
         for local, remote in files_to_push:
             _push_file_raw(s, os.path.join(HERE, local), "/" + remote.lstrip("/"))
+            _feed_running_wdt(s)
         print("  all files confirmed on device; resetting")
         s.write(b"import machine\r\n")
         s.write(b"machine.reset()\r\n")
