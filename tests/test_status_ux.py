@@ -948,8 +948,11 @@ class TestProvisionedBoot(unittest.TestCase):
         return display, led_log
 
     def test_joining_then_joined_then_idle_and_ip_is_shown(self):
+        # 2.0 s of wall time: the status page holds 250 ms, and the heatmap
+        # count after it depends on how fast the host runs the loop (a loaded
+        # machine managed only two draws in the old 0.9 s window).
         with mock.patch.object(flexgrid, "STATUS_HOLD_MS", 250):
-            display, led_log = self.boot(FakeNet(0.2), 0.9)
+            display, led_log = self.boot(FakeNet(0.2), 2.0)
         self.assertEqual(led_log[:3], ["joining", "joined", "idle_unassigned"])
         self.assertEqual(display.shown[0], ["OpenMuscle V4", SettingsManager.load()["device_id"],
                                             "Joining Wi-Fi...", "HomeNet"])
