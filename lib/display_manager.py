@@ -26,13 +26,15 @@ class DisplayManager:
             self.clear()
             logger.info(f"SSD1306 {width}x{height} initialized")
         except Exception as e:
-            logger.error(f"SSD1306 init failed: {e}. Display disabled.")
+            # Kit bands ship without the screen (header unplugged), so this is
+            # the normal case, not a fault. The band carries on without it.
+            logger.warn(f"No screen: {e}. Display disabled (normal on a band shipped without one).")
 
     @property
     def present(self):
-        """True when the OLED answered at init. False means nobody can read
-        the screen, so the setup password cannot be shown (the status LED
-        then uses its own no-display pattern)."""
+        """True when the OLED answered at init. False is normal on a kit band
+        (shipped without the screen): the setup password is then read from the
+        sticker, and the status LED uses its own no-display pattern."""
         return self.oled is not None
 
     def clear(self):

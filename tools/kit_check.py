@@ -3,7 +3,9 @@
 Reads the band's settings, log files, I2C bus, battery and firmware files,
 decides whether it is in FACTORY STATE (ready to hand to someone who will give
 it their own Wi-Fi), and prints either FAIL with the reasons or PASS with the
-text for the band's sticker.
+text for the band's sticker. On FAIL it still prints the setup name and
+password (clearly marked as read only, not sticker text) when the band has a
+well-formed one, because a band without a screen shows them nowhere else.
 
 Usage:
     python tools/kit_check.py <runtime_com> [options]
@@ -19,6 +21,9 @@ Usage:
                         log can name a Wi-Fi network from bench testing)
         --min-battery V fail when the battery is under V volts (default 3.7)
         --require-sd    fail, instead of warn, when no SD card mounts
+        --require-screen
+                        fail, instead of warn, when no screen answers (only
+                        for bands that are meant to ship WITH the screen)
         --require-tag   fail, instead of warn, unless this checkout is exactly
                         on a git tag (the public release)
         --reset         reboot the band afterwards
@@ -28,11 +33,17 @@ Factory state means all of: no Wi-Fi name or password saved, no join history
 that names a Wi-Fi network. A log.txt that only holds boot lines from the
 band's own setup network is fine.
 
-Other checks: the OLED answers at 0x3C (without it nobody can read the setup
-password), the battery reads at least --min-battery, the band has a setup
-password of the right shape, and every firmware file on the band is
-byte-identical to this checkout (so the band runs exactly the code in the repo,
-ideally the tagged release; see --require-tag).
+Other checks: whether the OLED answers at 0x3C, the battery reads at least
+--min-battery, the band has a setup password of the right shape, and every
+firmware file on the band is byte-identical to this checkout (so the band runs
+exactly the code in the repo, ideally the tagged release; see --require-tag).
+
+The screen is a WARNING, not a failure, by default. Kit bands ship without the
+small screen (its header is left unplugged) and the firmware copes: the person
+reads the setup name and password from the sticker this tool prints, and the
+blue light with two quick blinks then a pause is the normal setup pattern. The
+warning says the sticker is the only place the password lives. Use
+--require-screen for a batch that is meant to carry the screen.
 
 The Wi-Fi password is never read back to the PC: the band only reports whether
 one is saved. Exit status: 0 PASS, 1 FAIL, 2 could not talk to the band.
@@ -327,14 +338,19 @@ def evaluate(report, opts, expected_hashes, tag_info):
     # I2C: OLED and IMU
     i2c = report.get("i2c")
     if i2c is None:
-        fail("OLED", "the I2C bus did not answer; check the display and IMU solder joints")
+        fail("OLED", "the I2C bus did not answer; check the motion sensor and the I2C solder joints")
     else:
         found = ", ".join("0x{:02X}".format(a) for a in i2c) or "nothing"
         if OLED_ADDR in i2c:
             ok("OLED", "answers at 0x{:02X} (I2C scan: {})".format(OLED_ADDR, found))
-        else:
-            fail("OLED", "not found at 0x{:02X} (I2C scan: {}); without it nobody can read the setup password".format(
+        elif opts.get("require_screen"):
+            fail("OLED", "not found at 0x{:02X} (I2C scan: {}) and --require-screen was given".format(
                 OLED_ADDR, found))
+        else:
+            warn("OLED", "not fitted (nothing at 0x{:02X}; I2C scan: {}). Expected: kit bands ship without "
+                 "the screen. The sticker is the only place the setup password lives, so print it and "
+                 "keep it with the band. The light blinks blue twice then pauses in setup; that is normal".format(
+                     OLED_ADDR, found))
         if any(a in i2c for a in IMU_ADDRS):
             ok("IMU", "answers")
         else:
@@ -439,7 +455,7 @@ def parse_report(stdout):
 def parse_args(argv):
     opts = {"port": None, "role": None, "label": None, "clear_logs": False,
             "min_battery": DEFAULT_MIN_BATTERY_V, "require_sd": False,
-            "require_tag": False, "reset": False}
+            "require_screen": False, "require_tag": False, "reset": False}
     it = iter(argv)
     for a in it:
         if a == "--role":
@@ -460,6 +476,8 @@ def parse_args(argv):
             opts["clear_logs"] = True
         elif a == "--require-sd":
             opts["require_sd"] = True
+        elif a == "--require-screen":
+            opts["require_screen"] = True
         elif a == "--require-tag":
             opts["require_tag"] = True
         elif a == "--reset":
@@ -498,6 +516,17 @@ def run_check(opts, runner=mpremote_exec, expected=None, tag_info=None, out=prin
     failures = [i for i in items if i[0] == "fail"]
     if failures:
         out("FAIL ({} problem{})".format(len(failures), "" if len(failures) == 1 else "s"))
+        psk = report.get("psk") or ""
+        if len(psk) == PSK_LENGTH and set(psk) <= set(PSK_CHARSET):
+            # A screenless band has no other way to show its password, so a
+            # band that is still charging or has already joined a network
+            # must stay readable. This is NOT sticker text.
+            out("")
+            out("Setup name and password (read only; this band FAILED the check, "
+                "do not print a sticker from it):")
+            dev = report.get("device_id") or ""
+            out("  Setup Wi-Fi      " + ap_name(report.get("device_type"), dev))
+            out("  Setup password   " + psk)
         status = 1
     else:
         out("PASS")

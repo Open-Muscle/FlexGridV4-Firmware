@@ -53,7 +53,11 @@ python flash.py --factory COM7
 4. Pushes the firmware files over one raw-REPL connection, with `boot.py` and `main.py` last so a half-installed band never starts.
 5. Restarts the band.
 
-**`--factory` pushes no `config/settings.json`, and none is needed in your checkout.** The erase already cleared the chip, so the band starts with no Wi-Fi details, makes a new id and setup password, and shows this within a few seconds:
+**`--factory` pushes no `config/settings.json`, and none is needed in your checkout.** The erase already cleared the chip, so the band starts with no Wi-Fi details, makes a new id and setup password, and starts setup mode within a few seconds.
+
+**Kit bands have no screen** (its header is left unplugged), and the firmware carries on without it (it logs `No screen`). The light blinks blue, **two quick blinks then a pause**: that is the normal setup pattern for a band without a screen, not a fault. Read the setup network name and password with `python tools/kit_check.py <port>`; it prints them as the sticker text on a PASS, and still prints them (marked read only, not for a sticker) when the check FAILs, for example while the battery is low or after the band has joined a network. The sticker is the only place the password is shown, so print one for every band.
+
+A band that does have a screen blinks its light blue once a second and shows this:
 
 ```
 WIFI SETUP
@@ -62,7 +66,7 @@ d7af0b
 PW kd3mpq72xy
 ```
 
-The top line alternates with `see guide`. The network name is split over two lines (read them as one name). The light blinks blue once a second. If it blinks blue **twice** then pauses, the screen is not answering: check the display connector and run `python tools/kit_check.py <port>`, which prints the I2C scan.
+The top line alternates with `see guide`. The network name is split over two lines (read them as one name). If you expected a screen and the light still blinks twice, check the display connector, and run `python tools/kit_check.py <port> --require-screen`, which fails and prints the I2C scan when nothing answers at 0x3C.
 
 Every flash gives the band a **new id and a new setup password**. A band you flashed before shows up as a new device, and any sticker made earlier is wrong.
 
@@ -82,7 +86,7 @@ Every flash gives the band a **new id and a new setup password**. A band you fla
 python tools/kit_check.py COM8 --role left --label "Band A" --clear-logs
 ```
 
-Reads the band over USB. It fails with a readable reason when the band is not in factory state, the screen or the battery is missing, or the firmware differs from this checkout. On PASS it prints the text for the band's sticker. Options and the failure messages are in the [README](README.md#pre-ship-check) and [docs/kit-prep.md](docs/kit-prep.md#e-roles-clean-up-and-the-pre-ship-check).
+Reads the band over USB. It fails with a readable reason when the band is not in factory state, the battery is missing, or the firmware differs from this checkout. A missing screen is only a warning (kit bands ship without one); `--require-screen` makes it a failure. On PASS it prints the text for the band's sticker. Options and the failure messages are in the [README](README.md#pre-ship-check) and [docs/kit-prep.md](docs/kit-prep.md#e-roles-clean-up-and-the-pre-ship-check).
 
 ### The announcement check (after the band has joined a network)
 
@@ -92,11 +96,11 @@ A band that has joined a network broadcasts a small JSON announcement to UDP por
 python -c "import socket, json; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('', 3140)); s.settimeout(15); print(json.loads(s.recvfrom(4096)[0]))"
 ```
 
-You should see the band's `id` (`flexgrid-<6hex>`), `dev`, `fw`, `caps` and `services` fields. (Port 3141 is where the sensor data goes after a computer subscribes; announcements are not sent there.) If nothing arrives: the band may not have joined (look at the light and the screen), the computer may be on a different network or behind "client isolation", the computer's firewall may be blocking UDP 3140, or the app is already receiving from the band, which silences the announcements.
+You should see the band's `id` (`flexgrid-<6hex>`), `dev`, `fw`, `caps` and `services` fields. (Port 3141 is where the sensor data goes after a computer subscribes; announcements are not sent there.) If nothing arrives: the band may not have joined (look at the light, and the screen if it has one), the computer may be on a different network or behind "client isolation", the computer's firewall may be blocking UDP 3140, or the app is already receiving from the band, which silences the announcements.
 
 ### What you should see after joining
 
-Blue steady while joining, green steady for 2 s once joined, then the pulse in the role colour. The screen shows `WIFI OK` and the band's address for 15 s; tap MENU at any time to see it again (a second tap shows battery, mode and the number of computers receiving, a third returns to the live grid). You can use that address to add the band by hand in the app if automatic discovery does not find it.
+Blue steady while joining, green steady for 2 s once joined, then the pulse in the role colour. A band with a screen shows `WIFI OK` and the band's address for 15 s; tap MENU at any time to see it again (a second tap shows battery, mode and the number of computers receiving, a third returns to the live grid). A band without a screen shows only the light; find its address in your router's device list or in the app. You can use that address to add the band by hand in the app if automatic discovery does not find it.
 
 ## Developer shortcut: preload Wi-Fi details
 
@@ -155,9 +159,10 @@ The OLED driver `ssd1306` is not part of the stock MicroPython image. This repos
 You do not need to hold a button to flash a band.
 
 - A blank band, and a band that `flash.py` bounces with its 1200-baud touch, appears as `303a:1001` and esptool can reach it.
-- The silkscreen **BOOT** button on the V4 board is wired to the chip's **reset** line (EN), not to GPIO 0. Pressing it restarts the band; holding it does not enter download mode. (This is why the firmware gives BOOT no action.)
+- The silkscreen **BOOT** button (BOOT1) on the V4 board is wired to the chip's **reset** line (EN), not to GPIO 0. Pressing it restarts the band; holding it does not enter download mode. (This is why the firmware gives BOOT no action.)
+- The switch printed **SW_RST1** (bottom left) is wired to the net the schematic labels `100`, which is the ESP32-S3 **IO0** boot-strap pin. For a stuck band that `flash.py` cannot reach: hold SW_RST1, press and release BOOT, then let go of SW_RST1. The chip starts in download mode and shows up as `303a:1001`; run `flash.py` again. In normal use SW_RST1 does nothing, and the firmware never reads that pin.
 
-If a band does not respond to `flash.py` at all, try a different cable and port, then see the USB notes below. Whether the programming header exposes GPIO 0 for a last-resort manual download mode is an open item on the [hardware confirm list](docs/device-reference.md#facts-still-to-confirm-on-a-physical-band).
+If a band does not respond to `flash.py` at all, try the SW_RST1 and BOOT sequence above, then a different cable and port, then see the USB notes below.
 
 ## Troubleshooting
 
@@ -191,17 +196,17 @@ Check the log on the band:
 python -m mpremote connect COM8 fs cat :log.txt
 ```
 
-If the log says "Wi-Fi did not join within 20s (wrong_password)" (or `no_ap_found`, `timeout`), the Wi-Fi name or password is wrong, or the network is 5 GHz only. On a band whose first join has never succeeded, the firmware then clears the saved password and restarts into `WIFI SETUP`, which shows the same reason on the screen and in `GET http://192.168.4.1/info` as `last_wifi_error`. Enter the details again from there. A band that has joined once keeps its details and keeps retrying, so a router that is off for a while is not a problem. If the log looks fine, run the announcement check above and check the computer's network and firewall.
+If the log says "Wi-Fi did not join within 20s (wrong_password)" (or `no_ap_found`, `timeout`), the Wi-Fi name or password is wrong, or the network is 5 GHz only. On a band whose first join has never succeeded, the firmware then clears the saved password and restarts into `WIFI SETUP`, which shows the same reason on the screen (if fitted) and in `GET http://192.168.4.1/info` as `last_wifi_error`. Enter the details again from there. A band that has joined once keeps its details and keeps retrying, so a router that is off for a while is not a problem. If the log looks fine, run the announcement check above and check the computer's network and firewall.
 
 If you preloaded details, check what is on the band: `python -m mpremote connect COM8 fs cat :config/settings.json` (this prints the Wi-Fi password; do not paste it anywhere).
 
 ### Pressing SELECT stopped the streaming
 
-A short tap on SELECT pauses (`PAUSED` on the screen); tap again to resume. Holding SELECT for 2 s starts RECORD (SD logging, Wi-Fi off). It only starts when an SD card mounts; without one the screen shows `NO SD CARD` and the band keeps streaming. If the screen shows `RECORDING`, tap SELECT once: the band stops the session, restarts and rejoins Wi-Fi. To disable RECORD on a band, set `"record_enabled": false` in its `config/settings.json`.
+A short tap on SELECT pauses (slow cyan breathing light; `PAUSED` on a screen); tap again to resume. Holding SELECT for 2 s starts RECORD (SD logging, Wi-Fi off). It only starts when an SD card mounts; without one a screen shows `NO SD CARD` and the band keeps streaming. If the light is breathing green (`RECORDING` on a screen), tap SELECT once: the band stops the session, restarts and rejoins Wi-Fi. To disable RECORD on a band, set `"record_enabled": false` in its `config/settings.json`.
 
 ### The band disappeared from the app after sitting on USB
 
-Charge mode turns Wi-Fi off. It starts when you hold MENU for 2 s, or by itself after `auto_charge_idle_s` (default 300) seconds with USB detected and no computer receiving. The screen shows `CHARGING / Wi-Fi off / unplug to resume / or tap SELECT`. Unplug USB, tap SELECT or hold MENU for 2 s to restart onto Wi-Fi.
+Charge mode turns Wi-Fi off. It starts when you hold MENU for 2 s, or by itself after `auto_charge_idle_s` (default 300) seconds with USB detected and no computer receiving. The light pulses purple (a screen shows `CHARGING / Wi-Fi off / unplug to resume / or tap SELECT`). Unplug USB, tap SELECT or hold MENU for 2 s to restart onto Wi-Fi.
 
 ## Notes for people assembling bare boards
 
