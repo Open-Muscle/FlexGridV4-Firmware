@@ -6,8 +6,9 @@ Removes the three files that can carry a previous owner's data:
     /log.txt.bak            rotated copy of the log
 
 The firmware itself stays installed. On the next boot the band finds no
-settings, mints a NEW device id and a NEW setup password, and shows WIFI SETUP
-on its OLED, exactly like a freshly factory-flashed board.
+settings, mints a NEW device id and a NEW setup password, and starts WIFI SETUP
+(on its OLED if a screen is fitted), exactly like a freshly factory-flashed
+board. Kit bands have no screen: read the new password with tools/kit_check.py.
 
 Usage:
     python wipe.py <runtime_com> [--reset]

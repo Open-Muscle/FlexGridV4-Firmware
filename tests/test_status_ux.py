@@ -496,6 +496,14 @@ class TestDisplayGeometry(unittest.TestCase):
         dm64.text_screen(["a"] * 10)
         self.assertEqual(dm64.oled.text.call_count, 8)
 
+    def test_missing_screen_logs_a_warning_not_an_error(self):
+        with mock.patch.object(display_manager.logger, "error") as err, \
+                mock.patch.object(display_manager.logger, "warn") as warn:
+            dm, _ = self.build(devices=())
+        self.assertFalse(dm.present)
+        err.assert_not_called()
+        self.assertIn("No screen", warn.call_args[0][0])
+
     def test_no_oled_is_reported(self):
         dm, _ = self.build(devices=())
         self.assertFalse(dm.present)
@@ -616,6 +624,15 @@ class TestSetupBranch(unittest.TestCase):
     def test_no_oled_uses_the_distinct_led_pattern(self):
         led, _ = self.run_main(FakeDisplay(present=False))
         self.assertEqual(led.states, ["setup_no_oled"])
+
+    def test_no_screen_is_normal_so_it_is_not_logged_as_an_error(self):
+        with mock.patch.object(flexgrid.logger, "error") as err, \
+                mock.patch.object(flexgrid.logger, "info") as info:
+            self.run_main(FakeDisplay(present=False))
+        err.assert_not_called()
+        said = " ".join(str(c.args[0]) for c in info.call_args_list)
+        self.assertIn("no screen", said.lower())
+        self.assertIn("sticker", said)
 
     def test_wiped_band_with_failure_reason_shows_it(self):
         display = FakeDisplay()

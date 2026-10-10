@@ -1238,8 +1238,8 @@ async def _handle_join_result(joined, network, settings, display, status_led, st
 
 async def setup_led_loop(status_led, name, interval_ms=33):
     """Animate one named palette state for as long as the band stays in setup
-    mode (blue 1 Hz blink, or the blue double blink when the OLED is not
-    answering)."""
+    mode (blue 1 Hz blink, or the blue double blink when there is no screen,
+    the normal case on a kit band)."""
     status_led.set_state(name)
     while True:
         try:
@@ -1334,12 +1334,13 @@ async def main():
         logger.info("Unprovisioned (wifi_ssid empty); entering AP mode")
         # Minimal subsystems for the AP path: display (to print SSID + PSK
         # on the OLED) and status LED (blue blink for setup mode; a double
-        # blink instead when the OLED did not answer, because then nobody can
-        # read the password and the LED is the only sign of life).
+        # blink instead when there is no screen, which is the normal case on
+        # a kit band: the password is then read from the sticker and the LED
+        # is the only sign of life).
         display    = DisplayManager(height=display_height_from(settings))
         status_led = StatusLed()
         if not display.present:
-            logger.error("Setup mode but the OLED is not answering; LED shows the no-display pattern")
+            logger.info("Setup mode with no screen (normal on a kit band): the sticker has the setup name and password; LED shows the no-screen pattern")
         led_name = "setup" if display.present else "setup_no_oled"
         asyncio.create_task(setup_led_loop(status_led, led_name))
 

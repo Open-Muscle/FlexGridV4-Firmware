@@ -36,7 +36,8 @@ ADC_ROW_3 = 4
 # ---------------------------------------------------------------------------
 # I2C bus (OLED SSD1306 128x32, ICM-42688-P IMU)
 # Shared bus; the OLED is at 0x3C and the IMU at 0x68 (AD0 low) or 0x69 (AD0 high).
-# Unchanged from V3.
+# Kit bands ship WITHOUT the OLED (its header is left unplugged); the firmware
+# logs "No screen" and carries on. Unchanged from V3.
 # ---------------------------------------------------------------------------
 I2C_SDA = 8
 I2C_SCL = 9
@@ -59,17 +60,30 @@ SD_CS    = 14   # PIN_TODO: confirm against V4 schematic (V3 reserved 14 as a ge
 #
 # IMPORTANT: the silkscreen "BOOT" button (BOOT1) is wired to EN (chip
 # reset), NOT to GPIO0. Pressing it reboots the chip; it cannot be read
-# as an input. Do not hang firmware actions on GPIO0 -- it floats.
+# as an input.
+#
+# The switch printed SW_RST1 (bottom left) IS on GPIO0: its schematic net is
+# labelled "100", which is the ESP32-S3 IO0 pin. Holding SW_RST1 while
+# pressing BOOT1 puts the chip in download mode (reflash a stuck board);
+# otherwise it does nothing in normal use. GPIO0 is a boot-strap pin (low
+# at reset selects download mode), so the firmware must NOT read it or hang
+# any action on it: a press while the chip resets would change how it boots.
+#
+# The power button SW_PWR1 (top edge) goes to the MAX16054 soft-power
+# controller, not to a GPIO; see PWR_OFF below.
 # ---------------------------------------------------------------------------
 BTN_SELECT = 10    # SELECT1 -> IO10
 BTN_MENU   = 21    # MENU1   -> IO21
-# BTN_BOOT (GPIO0) intentionally removed: the physical BOOT button pulls
-# EN (reset), so GPIO0 has no button on it.
+# BTN_BOOT (GPIO0) intentionally absent: GPIO0 is the boot-strap pin that
+# SW_RST1 pulls low (see above), so firmware leaves it alone. The BOOT1
+# button pulls EN (reset) and cannot be read at all.
 
 # ---------------------------------------------------------------------------
 # Power management
 # ---------------------------------------------------------------------------
 PWR_OFF  = 45      # drive HIGH momentarily to tell MAX16054 to drop power
+                   # (the power button SW_PWR1 reaches the same MAX16054: a
+                   # short press switches on, a short press again switches off)
 ADC_BAT  = 18      # battery voltage divider
 # VBUS presence detect - V4.2 SCHEMATIC ONLY, NOT WIRED ON AS-BUILT V4
 # BOARDS (Tory 2026-07-02: R19/R20 divider into GPIO39 was added to the

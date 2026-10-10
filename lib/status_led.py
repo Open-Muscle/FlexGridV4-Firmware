@@ -42,7 +42,7 @@ PALETTE_DEFAULT = {
     # --- Boot and Wi-Fi bring-up (shown only while the band starts up) ---
     "boot":             (0,   0,   200, "breathe"),     # blue breathe for the instant before the animator runs
     "setup":            (0,   0,   255, "blink_slow"),  # blue 1 Hz blink = setup mode, read the OLED
-    "setup_no_oled":    (0,   0,   255, "blink_double"), # blue double blink = setup mode but the OLED is not answering
+    "setup_no_oled":    (0,   0,   255, "blink_double"), # blue double blink = setup mode, no screen fitted (normal on a kit band: read the sticker)
     "joining":          (0,   0,   200, "solid"),       # blue solid = joining your Wi-Fi
     "joined":           (0,   200, 0,   "solid"),       # green solid for 2 s = joined, then the normal idle pulse
     "join_failed":      (200, 80,  0,   "blink_fast"),  # amber fast blink = first join failed, going back to setup
@@ -164,8 +164,8 @@ class StatusLed:
             return
         if mode == "blink_double":
             # Two short flashes then a pause, 1.5 s period: the pattern for
-            # "setup mode but no OLED answered", so it cannot be mistaken for
-            # the plain 1 Hz setup blink.
+            # "setup mode, no screen fitted" (the normal kit band), so it cannot
+            # be mistaken for the plain 1 Hz setup blink.
             t_in = t_ms % 1500
             on = t_in < 120 or 240 <= t_in < 360
             if on:
