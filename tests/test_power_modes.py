@@ -206,8 +206,13 @@ class AutoChargeTests(unittest.TestCase):
         env = Env(FakeSD(), **settings)
         env.power.is_vbus_present.return_value = True
         env.state.idle_seconds = idle_start
-        # the idle counter and the auto-charge check run on the loop's 1 Hz branch
-        run_loop(env, lambda: env.state.power_mode == "charge", timeout=2.5, tick_ms=10)
+        # The idle counter and the auto-charge check run on the loop's 1 Hz
+        # branch. Stop after a few counted seconds rather than on wall time:
+        # how many branches fit in a wall-clock window depends on the Python
+        # version's asyncio timer pacing (3.12 spins far faster than 3.13).
+        stop_at = idle_start + 3
+        run_loop(env, lambda: env.state.power_mode == "charge"
+                 or env.state.idle_seconds >= stop_at, timeout=6.0, tick_ms=10)
         return env
 
     def test_default_threshold_is_five_minutes(self):

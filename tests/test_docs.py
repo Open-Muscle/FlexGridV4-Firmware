@@ -8,6 +8,7 @@ published files (no long dashes, nobody named, no leftover "in fab" status).
 """
 import inspect
 import os
+import subprocess
 import re
 import sys
 import unittest
@@ -65,11 +66,24 @@ def anchors(text):
 
 class TestHouseRules(unittest.TestCase):
     def tracked_text_files(self):
+        """Text files git tracks. Falls back to a folder walk when git is not
+        available; either way, untracked backup folders are not the repo."""
+        exts = (".md", ".py", ".json", ".txt")
+        try:
+            out = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, check=True,
+                                 capture_output=True).stdout.decode("utf-8")
+            for rel in out.split("\0"):
+                if rel.endswith(exts) and not rel.startswith("firmware/"):
+                    yield os.path.join(ROOT, rel)
+            return
+        except (OSError, subprocess.CalledProcessError):
+            pass
         skip_dirs = {".git", "firmware", "__pycache__"}
         for dirpath, dirnames, filenames in os.walk(ROOT):
-            dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+            dirnames[:] = [d for d in dirnames if d not in skip_dirs
+                           and not d.startswith("_")]
             for fn in filenames:
-                if fn.endswith((".md", ".py", ".json", ".txt")):
+                if fn.endswith(exts):
                     yield os.path.join(dirpath, fn)
 
     def test_no_long_dashes_anywhere(self):
