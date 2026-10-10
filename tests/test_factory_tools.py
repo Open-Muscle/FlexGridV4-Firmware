@@ -217,3 +217,21 @@ class WipeCommandTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KitCheckImuAddressesTest(unittest.TestCase):
+    """The pre-ship check must accept every IMU address the firmware driver
+    does; an as-built board with the TOKMAS part at 0x37 was reported as
+    having no IMU while the firmware had found it."""
+
+    def test_kit_check_accepts_every_driver_address(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for sub in ("tools", "lib"):
+            p = os.path.join(root, sub)
+            if p not in sys.path:
+                sys.path.insert(0, p)
+        import kit_check
+        import imu
+        driver = set(imu._INV_ADDRS) | set(imu._TKM_ADDRS) | set(imu._BMI_ADDRS)
+        self.assertTrue(driver <= set(kit_check.IMU_ADDRS),
+                        sorted(driver - set(kit_check.IMU_ADDRS)))

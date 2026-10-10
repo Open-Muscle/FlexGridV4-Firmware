@@ -55,7 +55,9 @@ import flash  # noqa: E402  (repo-root module; firmware_files lists what is flas
 PSK_CHARSET = "abcdefghijkmnpqrstuvwxyz23456789"
 PSK_LENGTH = 10
 OLED_ADDR = 0x3C
-IMU_ADDRS = (0x68, 0x69)
+# Every address the firmware's IMU driver accepts: InvenSense/Bosch parts at
+# 0x68/0x69 and the TOKMAS ICM-42688-P rebrand at 0x36/0x37 (lib/imu.py).
+IMU_ADDRS = (0x36, 0x37, 0x68, 0x69)
 ROLES = ("left", "right", "labeler")
 LABEL_MAX = 16
 DEFAULT_MIN_BATTERY_V = 3.7
@@ -336,7 +338,7 @@ def evaluate(report, opts, expected_hashes, tag_info):
         if any(a in i2c for a in IMU_ADDRS):
             ok("IMU", "answers")
         else:
-            warn("IMU", "not found at 0x68 or 0x69; orientation data will be missing")
+            warn("IMU", "not found at 0x36, 0x37, 0x68 or 0x69; orientation data will be missing")
 
     # Battery
     vbat = report.get("vbat")
