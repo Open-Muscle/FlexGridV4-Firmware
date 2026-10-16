@@ -102,6 +102,10 @@ You should see the band's `id` (`flexgrid-<6hex>`), `dev`, `fw`, `caps` and `ser
 
 Blue steady while joining, green steady for 2 s once joined, then the pulse in the role colour. A band with a screen shows `WIFI OK` and the band's address for 15 s; tap MENU at any time to see it again (a second tap shows battery, mode and the number of computers receiving, a third returns to the live grid). A band without a screen shows only the light; find its address in your router's device list or in the app. You can use that address to add the band by hand in the app if automatic discovery does not find it.
 
+## Give a band Wi-Fi over the USB cable
+
+A band running this firmware accepts its Wi-Fi name and password as a JSON command on its USB serial port, in setup mode and on a joined band, which is how the PC app sets a band up. It is also the quickest way to move a bench band to another network without the setup page. See [docs/usb-console.md](docs/usb-console.md) for the commands and a short `pyserial` example. `flash.py` pushes `lib/usb_console.py` with the rest of the firmware. Ctrl-C from `mpremote` still stops the program as before.
+
 ## Developer shortcut: preload Wi-Fi details
 
 For your own bench boards you can skip the setup screen:

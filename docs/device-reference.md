@@ -16,12 +16,13 @@ Every line below was checked against the firmware source and the V4 KiCad schema
 
 **Switch on and charge.** The power button is the small switch at the top edge: one short press switches the band on, one short press again switches it off. Plug in USB-C to charge: the small CHRG light on the board is the charging truth.
 
-**First time: give the band your Wi-Fi (2.4 GHz, with a password, no sign-in page).** Your band has no screen, so everything you need to read is on its sticker.
+**First time: give the band your Wi-Fi (2.4 GHz, with a password, no sign-in page).** You do this in the OpenMuscle app on your computer, over the USB cable. Your band has no screen; its light and its sticker tell you everything.
 
-1. **Plug the band into USB first** (a computer port or a charger) and leave it plugged in until setup is finished: on battery alone the band cannot start its setup network. The light blinks blue, two quick blinks then a pause. That is normal: it means the band is waiting to be set up.
-2. On a phone or laptop, join the Wi-Fi named on the sticker (`OM-flexgrid-` plus six characters). Password: the **Setup password** on the sticker (10 characters).
-3. Open `http://192.168.4.1` in a browser (type `http://`). Enter your Wi-Fi name and password. Press Connect.
-4. Join your normal Wi-Fi again. The light goes steady blue, then green for 2 s, then pulses while it waits for the computer. From here the band runs on battery; USB is only needed again to charge, or to set up Wi-Fi again.
+1. **Plug the band into USB first**, with a USB-C **data** cable into the computer that runs the app, and leave it plugged in until setup is finished: on battery alone the band cannot start its setup network. The light blinks blue, two quick blinks then a pause. That is normal: it means the band is waiting to be set up.
+2. In the app open the device setup page (`/setup`), choose the band's USB port, type your Wi-Fi name and password and press Connect. The app sends them to the band down the cable.
+3. The band restarts by itself. The light goes steady blue, then green for 2 s, then pulses while it waits for the computer. From here the band runs on battery; USB is only needed again to charge, or to set up Wi-Fi again.
+
+**No app, or it cannot see the band?** The band's own setup network still works as a fallback: join the Wi-Fi named on the sticker (`OM-flexgrid-` plus six characters; password: the **Setup password** on the sticker, 10 characters), open `http://192.168.4.1` (type `http://`), enter your Wi-Fi name and password, press Connect, then join your normal Wi-Fi again.
 
 (A band that does have a screen shows the same name and password on `WIFI SETUP`, and its light blinks blue once a second.)
 
@@ -71,6 +72,7 @@ Every line below was checked against the firmware source and the V4 KiCad schema
 - [The screen (OLED)](#the-screen-oled)
 - [Reading the live grid](#reading-the-live-grid)
 - [Modes: streaming, paused, charge, record](#modes-streaming-paused-charge-record)
+- [Setting up over the USB cable](#setting-up-over-the-usb-cable)
 - [Setup mode and getting back to it](#setup-mode-and-getting-back-to-it)
 - [If it will not connect](#if-it-will-not-connect)
 - [Facts still to confirm on a physical band](#facts-still-to-confirm-on-a-physical-band)
@@ -246,9 +248,29 @@ Record mode writes one file per session to `sessions/` on the SD card, a CSV wit
 
 ---
 
+## Setting up over the USB cable
+
+This is the normal way to give a band its Wi-Fi. The app sends the Wi-Fi name and password to the band down the USB cable, so you never have to join the band's own network or open a web address.
+
+What you do:
+
+1. Plug the band into the computer that runs the app with a USB-C **data** cable (some cables only charge; if the app cannot see the band, try another cable). Leave it plugged in.
+2. Start the app (`openmuscle web`) and open the device setup page (`/setup`).
+3. If the app asks which USB port the band is on, choose it.
+4. Type your Wi-Fi name and password (2.4 GHz, with a password, no sign-in page) and press Connect.
+5. The band saves them and restarts by itself, which takes a few seconds. Its USB port disappears and comes back; the app handles that. Then the light goes steady blue (joining), green for 2 s (joined), and pulses while it waits for the app.
+
+If the join fails (a typo in the password, or a 5 GHz-only network) the band forgets the details, blinks amber and comes back to the blue two-blink setup pattern; send them again from step 4. The same cable channel can also erase a band's Wi-Fi and set its left or right role.
+
+The setup network and the `192.168.4.1` page described below stay in the band as the fallback. Use them when you have no app, or the app cannot open the band's port.
+
+Developers: the exact commands and replies are in [usb-console.md](usb-console.md).
+
+---
+
 ## Setup mode and getting back to it
 
-A band with no Wi-Fi saved starts **setup mode**. It becomes its own Wi-Fi network named `OM-flexgrid-<6 characters>` (WPA2, channel 1, up to 4 devices) and serves a small page at `http://192.168.4.1`.
+A band with no Wi-Fi saved starts **setup mode**. It becomes its own Wi-Fi network named `OM-flexgrid-<6 characters>` (WPA2, channel 1, up to 4 devices) and serves a small page at `http://192.168.4.1`. This is the fallback route: the normal one is [over the USB cable](#setting-up-over-the-usb-cable), which works in setup mode too.
 
 **Do the Wi-Fi setup with the USB cable plugged in.** On battery alone the band cannot start its setup network: the light stays at the faint glow and never blinks blue. Once the band has its Wi-Fi, it joins and runs on battery with no cable. The same goes for starting over: hold MENU and SELECT for 3 s with USB plugged in, so the band can come back up in setup mode.
 
@@ -260,7 +282,7 @@ A band with no Wi-Fi saved starts **setup mode**. It becomes its own Wi-Fi netwo
 4. Join your normal Wi-Fi again on the phone or laptop.
 5. The band restarts and tries to join. A steady blue light shows for up to 20 s (a band with a screen also shows `Joining Wi-Fi...`). On success the light goes green for 2 s and a band with a screen shows `WIFI OK` and the address for 15 s; then the live grid. Without a screen, the light going green and then pulsing in the role colour is your sign that it joined.
 
-The PC app can do the same steps for you from its device setup page (`/setup` in the app); see the app's Wi-Fi guide.
+The PC app can also do this for you over the USB cable (see above) from its device setup page (`/setup` in the app); see the app's Wi-Fi guide.
 
 **If the first join fails** the band does not retry for ever. It shows `WIFI FAILED` and the reason for about 2 s, blinks amber, forgets the password, restarts and is back in setup mode with the **same network name and password as before** (about 30 s in all). The top line of the setup screen then also shows `LAST TRY FAILED` and the reason. Without a screen, the sign is the fast amber blink followed by the blue two-blink pattern again. Join its network (name and password from the sticker) and enter the details again.
 

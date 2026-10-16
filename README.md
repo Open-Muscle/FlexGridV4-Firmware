@@ -32,6 +32,10 @@ You need a Wi-Fi network that is **2.4 GHz**, has a **password**, has **no sign-
 
 **Kit bands have no screen**, so a new band shows only its light: **blue, two quick blinks then a pause**. That is the normal setup pattern, not a fault. The setup Wi-Fi name and password are on the **sticker** on the band (`Setup Wi-Fi` and `Setup password`).
 
+**The normal way is in the app, over the USB cable.** With the band plugged into the computer that runs the OpenMuscle app (use a USB-C **data** cable), open the app's device setup page (`/setup`), choose the band's USB port if it asks, type your Wi-Fi name and password and press Connect. The app sends them to the band down the cable and the band restarts by itself; skip to "The band now tries to join" below. Details are in [Setting up over the USB cable](docs/device-reference.md#setting-up-over-the-usb-cable).
+
+**The fallback is the band's own setup network**, for a computer without the app or when the app cannot open the band's port. The steps below use it; they still work exactly as before.
+
 A band that does have a screen blinks its light blue once a second and shows this:
 
 ```
@@ -49,7 +53,7 @@ PW kd3mpq72xy
 
 The band now tries to join: blue steady light (and `Joining Wi-Fi...` on a screen) for up to 20 seconds. On success the light turns **green** for 2 seconds (a screen shows `WIFI OK` and the band's address), then the band streams the live pressure grid. The light settles to a brief pulse every 3 seconds in the band's role colour (blue left, red right, green labeler, white if no role is set) while it waits for the app.
 
-The computer app can run these steps for you from its device setup page; see the app's Wi-Fi guide.
+The computer app can also run this for you over the USB cable from its device setup page (see above and the app's Wi-Fi guide).
 
 **If it fails** the light blinks amber (a screen also says `WIFI FAILED` and the reason: `check password`, `network not found or 5 GHz`, or `join timed out`), and about 30 seconds later the band is back at `WIFI SETUP` (blue, two quick blinks then a pause, on a band without a screen) with the same network name and password from the sticker. Join it again and re-enter the details. The reasons and fixes are in [docs/device-reference.md](docs/device-reference.md#if-it-will-not-connect).
 
@@ -156,6 +160,10 @@ Right after provisioning the band tries to join for `sta_join_timeout_s` seconds
 
 `last_wifi_error` values: `wrong_password` (screen `check password`), `no_ap_found` (`network not found or 5 GHz`), `timeout` (`join timed out`). `POST /provision`, `POST /reprovision` and the MENU + SELECT wipe all reset `wifi_joined_ok` to false.
 
+### USB console
+
+The band also answers JSON commands on its USB serial port (`get_info`, `set_wifi`, `forget_wifi`, `set_role`), which is how the app gives it Wi-Fi over the cable. It runs in setup mode and on a joined band, and the HTTP setup below remains as the fallback. The exact protocol, with examples, is in [docs/usb-console.md](docs/usb-console.md); the code is `lib/usb_console.py`.
+
 ### Provisioning HTTP details
 
 The setup server (`http://192.168.4.1`, WPA2 network `OM-flexgrid-<6hex>`, channel 1, up to 4 clients) reads the request properly: headers up to the blank line, then exactly `Content-Length` bytes, within 3 seconds. `GET /` is a small web form, `GET /info` returns the band's identity as JSON, and `POST /provision` takes `{"ssid": "...", "password": "..."}`. The SSID is limited to 32 bytes and the password to 8..63 bytes (UTF-8 bytes, not characters; an empty password means an open network), and both are stored exactly as sent. `POST /reprovision` also works on a joined band (on its LAN address): it clears the Wi-Fi settings, mints a new setup password and restarts.
@@ -206,7 +214,8 @@ FlexGridV4-Firmware/
 ├── LICENSE                       (MIT, OpenMuscle)
 ├── docs/
 │   ├── device-reference.md       (lights, screens, buttons, power; one-page quick card)
-│   └── kit-prep.md               (checklist for preparing bands to ship)
+│   ├── kit-prep.md               (checklist for preparing bands to ship)
+│   └── usb-console.md            (the JSON commands on the USB cable: Wi-Fi setup from the app)
 ├── boot.py                       (boot sequence, sys.path setup)
 ├── main.py                       (entry point)
 ├── flexgrid.py                   (main loop, wires the subsystems together)
@@ -225,6 +234,7 @@ FlexGridV4-Firmware/
     ├── ssd1306.py                (OLED driver from micropython-lib)
     ├── screens.py                (text layouts: setup, join failure, status, mode banners)
     ├── provisioning.py           (setup-mode Wi-Fi network + HTTP provisioning API)
+    ├── usb_console.py            (JSON commands on the USB serial port: Wi-Fi setup from the app)
     ├── menu_manager.py           (retired on-screen menu; not started)
     ├── status_led.py             (RGB LED PWM control + state palette)
     ├── imu.py                    (ICM-42688-P read)
