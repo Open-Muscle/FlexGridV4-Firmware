@@ -455,6 +455,47 @@ class LineBufferTests(unittest.TestCase):
         line = cmd("set_wifi", "id", ssid="s" * 32, password="p" * 63).encode()
         self.assertLess(len(line), uc.MAX_LINE_BYTES)
 
+    # MicroPython's sys.stdin is a text stream: read(1) gives a 1-char str.
+    def test_accepts_one_char_strs(self):
+        buf = uc.LineBuffer(now_ms=lambda: 1000)
+        self.assertIsNone(buf.feed("{"))
+        self.assertIsNone(buf.feed("}"))
+        self.assertEqual(buf.feed("\n"), b"{}")
+
+    def test_a_str_stream_gives_the_same_lines_as_bytes(self):
+        text = cmd("get_info", "s1") + "\r\n" + cmd("set_role", "s2", role="left") + "\n"
+        a = uc.LineBuffer(now_ms=lambda: 1000)
+        b = uc.LineBuffer(now_ms=lambda: 1000)
+        from_str = [r for r in (a.feed(ch) for ch in text) if r is not None]
+        from_bytes = self.feed_all(b, text.encode())
+        self.assertEqual(from_str, from_bytes)
+        self.assertEqual(len(from_str), 2)
+
+    def test_non_ascii_str_chars_keep_all_their_utf8_bytes(self):
+        buf = uc.LineBuffer(now_ms=lambda: 1000)
+        line = None
+        for ch in '{"ssid":"café"}\n':
+            r = buf.feed(ch)
+            if r is not None:
+                line = r
+        self.assertEqual(line, '{"ssid":"café"}'.encode("utf-8"))
+        self.assertEqual(uc.clean_line(line), '{"ssid":"café"}')
+
+    def test_a_lone_high_str_char_does_not_raise(self):
+        buf = uc.LineBuffer(now_ms=lambda: 1000)
+        self.assertIsNone(buf.feed("ÿ"))
+        self.assertIsNone(buf.feed(0xFF))
+        self.assertIsNone(buf.feed(b"\xff"))
+
+    def test_empty_inputs_are_ignored(self):
+        buf = uc.LineBuffer(now_ms=lambda: 1000)
+        self.assertIsNone(buf.feed(""))
+        self.assertIsNone(buf.feed(b""))
+        self.assertIsNone(buf.feed(bytearray()))
+        buf.feed("{")
+        buf.feed("}")
+        self.assertEqual(buf.feed("\n"), b"{}")
+
 
 class ServeTask(unittest.TestCase):
     """serve() against a scripted byte source."""
@@ -505,6 +546,75 @@ class ServeTask(unittest.TestCase):
             return item
         self.run_serve(rig, read_byte)
         self.assertEqual([json.loads(w)["id"] for w in rig.writes], ["z"])
+
+    def test_str_source_gets_a_correct_ack_end_to_end(self):
+        # The shape sys.stdin has on the board: 1-char strs, not bytes.
+        text = ("boot noise\r\n" + cmd("get_info", "str1") + "\r\n"
+                + cmd("set_role", "str2", role="right") + "\n")
+        chars = list(text)
+
+        async def read_byte():
+            if not chars:
+                raise asyncio.CancelledError()
+            return chars.pop(0)
+        rig = Rig()
+        self.run_serve(rig, read_byte)
+        replies = [json.loads(w) for w in rig.writes]
+        self.assertEqual([r["id"] for r in replies], ["str1", "str2"])
+        self.assertTrue(all(r["ok"] for r in replies))
+        self.assertEqual(replies[0]["data"]["id"], "flexgrid-abc123")
+        self.assertEqual(replies[1]["data"], {"role": "right"})
+
+    def test_str_set_wifi_replies_then_restarts(self):
+        chars = list(cmd("set_wifi", "w", ssid="Café Net", password="correct horse") + "\n")
+
+        async def read_byte():
+            if not chars:
+                raise asyncio.CancelledError()
+            return chars.pop(0)
+        rig = Rig()
+        self.run_serve(rig, read_byte)
+        self.assertEqual(rig.events, ["reply", "sleep:1000", "restart"])
+        self.assertEqual(rig.settings["wifi_ssid"], "Café Net")
+
+    def run_script(self, script):
+        """Run serve() over a script of exceptions / byte values; returns the
+        list of logger.warn messages."""
+        warns = []
+        real = uc.logger.warn
+        uc.logger.warn = warns.append
+        script = list(script)
+
+        async def read_byte():
+            if not script:
+                raise asyncio.CancelledError()
+            item = script.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+        try:
+            self.run_serve(Rig(), read_byte)
+        finally:
+            uc.logger.warn = real
+        return warns
+
+    def test_a_persistent_read_error_is_logged_once_then_rarely(self):
+        n = uc.ERROR_LOG_EVERY * 2 + 5
+        warns = self.run_script([OSError("usb gone")] * n)
+        # first failure, then one per ERROR_LOG_EVERY repeats
+        self.assertEqual(len(warns), 3)
+        self.assertIn("OSError", warns[0])
+        self.assertIn("x{}".format(uc.ERROR_LOG_EVERY + 1), warns[1])
+
+    def test_a_new_kind_of_error_is_logged_at_once(self):
+        warns = self.run_script([OSError("a")] * 5 + [ValueError("b")] * 5 + [OSError("c")])
+        self.assertEqual(len(warns), 3)
+        self.assertIn("ValueError", warns[1])
+
+    def test_errors_between_good_bytes_are_each_logged(self):
+        # a good byte resets the counter, so isolated glitches are not hidden
+        warns = self.run_script([OSError("g1"), b" ", OSError("g2"), b" "])
+        self.assertEqual(len(warns), 2)
 
     def test_keyboard_interrupt_is_not_swallowed(self):
         rig = Rig()

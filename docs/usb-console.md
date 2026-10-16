@@ -63,7 +63,7 @@ Error codes:
 | `unknown_verb` | `data.verb` is missing or not one of the four verbs |
 | `bad_ssid` | `ssid` is missing, blank, or not 1 to 32 bytes of UTF-8 |
 | `bad_password` | `password` is not 8 to 63 bytes of UTF-8 (or empty for an open network) |
-| `save_failed` | The band could not write its settings to flash. Nothing changed and the band did not restart |
+| `save_failed` | The band could not write its settings to flash. Nothing changed and the band did not restart. Also the fallback for an unexpected failure inside a verb; the message then ends with the error type (for example `OSError`) |
 
 Lengths are in UTF-8 bytes, as Wi-Fi counts them, not in characters. The name and password are stored exactly as sent (no trimming). A missing `password`, or `null`, means an open network.
 
@@ -88,7 +88,7 @@ Every example below is checked by the tests against the code. The band here is j
 | `id` | the band's id (the same id as in its announcements) |
 | `role` | `left`, `right`, `labeler`, or `""` |
 | `fw` | firmware version |
-| `state` | `unprovisioned` (no Wi-Fi saved: the band is in setup mode) or `provisioned` (a Wi-Fi name is saved) |
+| `state` | `unprovisioned` (no Wi-Fi saved: the band is in setup mode) or `provisioned` (a Wi-Fi name is saved; this does not prove a join has worked yet) |
 | `wifi_ssid` | the saved Wi-Fi name, or `""` |
 | `ip` | the band's current address on that Wi-Fi, or `""` when it is not connected (always `""` in setup mode) |
 | `usb_console` | always `1`; tells the host this firmware has the console |
@@ -183,6 +183,8 @@ while True:
         print(json.loads(line))
         break
 ```
+
+When a band that already has a Wi-Fi saved is reset, the console only starts once its join attempt has finished (up to about 20 seconds). A host that sends a command right after a reset should retry `get_info` for about 30 seconds before treating silence as a failure.
 
 Do not run this at the same time as `mpremote`, `flash.py` or `tools/kit_check.py` on the same port: only one program can hold a serial port.
 

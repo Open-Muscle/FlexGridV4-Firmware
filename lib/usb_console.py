@@ -49,6 +49,9 @@ STALE_LINE_MS = 2000
 # Pause when the stream returns nothing, so a closed port cannot spin the loop.
 IDLE_MS = 50
 ERROR_PAUSE_MS = 200
+# A failing read repeats every ERROR_PAUSE_MS, and warn() is flushed to flash,
+# so only the first failure of a kind and then every Nth is logged.
+ERROR_LOG_EVERY = 100
 
 # CancelledError is a BaseException subclass in modern asyncio; older
 # MicroPython builds may not expose it. Same fallback as lib/commands.py.
@@ -101,9 +104,11 @@ def clean_line(raw):
 
 class LineBuffer:
     """Collects bytes into lines. feed() takes one byte (an int or a length-1
-    bytes) and returns a finished line (bytes, newline removed) or None. A line
-    that outgrows MAX_LINE_BYTES is dropped up to its newline, and a half line
-    older than STALE_LINE_MS is thrown away when the next byte arrives."""
+    bytes) and returns a finished line (bytes, newline removed) or None. It
+    also tolerates a str (MicroPython's text-mode sys.stdin hands back 1-char
+    strs): the str is fed as its UTF-8 bytes. A line that outgrows
+    MAX_LINE_BYTES is dropped up to its newline, and a half line older than
+    STALE_LINE_MS is thrown away when the next byte arrives."""
 
     def __init__(self, now_ms=None):
         self._now_ms = now_ms or time.ticks_ms
@@ -112,8 +117,18 @@ class LineBuffer:
         self._last = None
 
     def feed(self, b):
-        if not isinstance(b, int):
-            b = b[0]
+        if isinstance(b, int):
+            return self._feed_byte(b)
+        if isinstance(b, str):
+            b = b.encode("utf-8")       # encode, not ord: a char above 0x7F is several bytes
+        line = None
+        for one in b:                   # empty input feeds nothing
+            r = self._feed_byte(one)
+            if r is not None:
+                line = r
+        return line
+
+    def _feed_byte(self, b):
         now = self._now_ms()
         if (self._last is not None and self._buf
                 and time.ticks_diff(now, self._last) > STALE_LINE_MS):
@@ -316,8 +331,10 @@ def _stdin_byte_reader():
     """Production byte source: asyncio.StreamReader on sys.stdin, one byte at a
     time. read(1) only runs after the poll says a byte is ready, so it never
     blocks the event loop (readline() would sit inside C waiting for a newline
-    if a stray byte arrived without one)."""
-    reader = asyncio.StreamReader(sys.stdin)
+    if a stray byte arrived without one). MicroPython's sys.stdin is a text
+    stream (read returns str); sys.stdin.buffer is the bytes variant, so use it
+    when present. LineBuffer.feed copes with either."""
+    reader = asyncio.StreamReader(getattr(sys.stdin, "buffer", sys.stdin))
 
     async def read_byte():
         return await reader.read(1)
@@ -337,6 +354,8 @@ async def serve(console, read_byte=None):
             return
     lines = LineBuffer()
     logger.info("USB console ready")
+    fails = 0
+    last_kind = None
     while True:
         try:
             b = await read_byte()
@@ -346,9 +365,18 @@ async def serve(console, read_byte=None):
             line = lines.feed(b)
             if line is not None:
                 await console.process(line)
+            fails = 0
+            last_kind = None
         except (_CancelledError, SystemExit, KeyboardInterrupt):
             raise
         except Exception as e:
-            logger.warn("USB console read/handle failed: {} ({})".format(
-                type(e).__name__, e))
+            kind = type(e).__name__
+            # Log the first failure, a change of failure type, and then only
+            # every ERROR_LOG_EVERY-th repeat, so a stuck port cannot fill the
+            # flash log at one line per ERROR_PAUSE_MS.
+            if kind != last_kind or fails % ERROR_LOG_EVERY == 0:
+                logger.warn("USB console read/handle failed: {} ({}){}".format(
+                    kind, e, "" if fails == 0 else " x{}".format(fails + 1)))
+            last_kind = kind
+            fails += 1
             await asyncio.sleep_ms(ERROR_PAUSE_MS)
