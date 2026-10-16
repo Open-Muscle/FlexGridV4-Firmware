@@ -129,6 +129,9 @@ class Discovery:
             # (counter jumped) so it can drop any cached subscription
             # state and re-subscribe cleanly. Monotonic per-device.
             "boot_seq":  self.boot_seq,
+            # The band answers JSON commands on its USB serial port
+            # (lib/usb_console.py).
+            "usb_console": 1,
         }
         if self.imu_scale:
             pkt["imu"] = dict(self.imu_scale)
