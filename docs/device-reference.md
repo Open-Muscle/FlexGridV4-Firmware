@@ -18,10 +18,10 @@ Every line below was checked against the firmware source and the V4 KiCad schema
 
 **First time: give the band your Wi-Fi (2.4 GHz, with a password, no sign-in page).** Your band has no screen, so everything you need to read is on its sticker.
 
-1. The light blinks blue, two quick blinks then a pause. That is normal: it means the band is waiting to be set up.
+1. **Plug the band into USB first** (a computer port or a charger) and leave it plugged in until setup is finished: on battery alone the band cannot start its setup network. The light blinks blue, two quick blinks then a pause. That is normal: it means the band is waiting to be set up.
 2. On a phone or laptop, join the Wi-Fi named on the sticker (`OM-flexgrid-` plus six characters). Password: the **Setup password** on the sticker (10 characters).
 3. Open `http://192.168.4.1` in a browser (type `http://`). Enter your Wi-Fi name and password. Press Connect.
-4. Join your normal Wi-Fi again. The light goes steady blue, then green for 2 s, then pulses while it waits for the computer.
+4. Join your normal Wi-Fi again. The light goes steady blue, then green for 2 s, then pulses while it waits for the computer. From here the band runs on battery; USB is only needed again to charge, or to set up Wi-Fi again.
 
 (A band that does have a screen shows the same name and password on `WIFI SETUP`, and its light blinks blue once a second.)
 
@@ -33,7 +33,7 @@ Every line below was checked against the firmware source and the V4 KiCad schema
 | Tap SELECT | Pause or resume (Wi-Fi stays on) |
 | Hold MENU 2 s | Charge mode on or off (Wi-Fi off while charging) |
 | Hold SELECT 2 s | Record to SD card on or off (needs an SD card) |
-| Hold MENU and SELECT 3 s | Forget Wi-Fi, go back to setup (keep holding until it restarts) |
+| Hold MENU and SELECT 3 s | Forget Wi-Fi, go back to setup (plug in USB first; keep holding until it restarts) |
 | Power button (top edge) | Short press: on. Short press again: off |
 | BOOT | Restart the band |
 
@@ -41,7 +41,8 @@ Every line below was checked against the firmware source and the V4 KiCad schema
 
 | Light | Meaning |
 |---|---|
-| Faint white glow, always | Powered on. Dark means switched off (the power button latches: this glow tells on from off) |
+| Faint glow (white, can look yellow), always | Powered on. Dark means switched off (the power button latches: this glow tells on from off) |
+| Only the faint glow, no blue blinks, while setting up | Setup does not start on battery alone: plug in USB |
 | Blue, two quick blinks then a pause | Setup, band without a screen (the kit): join the Wi-Fi on the sticker |
 | Blue, blinking once a second | Setup, band with a screen: read the screen, join the band's own Wi-Fi |
 | Blue, steady | Joining your Wi-Fi (up to 20 s) |
@@ -58,7 +59,7 @@ Every line below was checked against the firmware source and the V4 KiCad schema
 | Red, fast blink | Recovered from a crash (first minute) |
 | Magenta, blinking | Both buttons held: Wi-Fi will be erased at 3 s. Let go early to cancel |
 
-**If it will not connect:** 2.4 GHz only (the band cannot see 5 GHz); password-only networks (no sign-in page, no username-and-password networks); the computer must be on the same network and the router must let devices see each other (no guest or isolation mode); retype the password carefully; to start over hold MENU and SELECT for 3 s. A laptop may jump back to a known network while you are on the setup Wi-Fi: turn off auto-join for it.
+**If it will not connect:** 2.4 GHz only (the band cannot see 5 GHz); password-only networks (no sign-in page, no username-and-password networks); the computer must be on the same network and the router must let devices see each other (no guest or isolation mode); retype the password carefully; to start over, plug in USB and hold MENU and SELECT for 3 s. A laptop may jump back to a known network while you are on the setup Wi-Fi: turn off auto-join for it.
 
 ---
 
@@ -122,7 +123,9 @@ One table covers every state. The right-hand column is the name of the state in 
 
 How to read it: the colour says what kind of thing is happening, the pattern says which. Orange and amber are the same colour; steady means streaming and anything that blinks or pulses means trouble. When two things are true at once the one nearest the top of the second table wins.
 
-A powered band is never fully dark. A faint white glow sits under every pattern (the dark half of a blink, the gaps of the 3 s pulse), from the first moment the firmware runs. So dark means one thing only: the band is switched off. The power button latches, so this glow is also how you tell a press that switched the band on from one that switched it off.
+A powered band is never fully dark. A faint white glow (it can read yellow on the LED) sits under every pattern (the dark half of a blink, the gaps of the 3 s pulse), from the first moment the firmware runs. So dark means one thing only: the band is switched off. The power button latches, so this glow is also how you tell a press that switched the band on from one that switched it off.
+
+If the light stays at the faint glow and never blinks blue (two quick blinks, or one a second) on a band that has no Wi-Fi saved, the band is on battery alone, and on battery alone the band cannot start its setup network. Plug in USB; if the blue blink does not start, press BOOT to restart the band. A band that already has its Wi-Fi runs on battery without USB.
 
 ### All states
 
@@ -170,7 +173,7 @@ Highest first, as resolved by `_resolve_led_state` in `flexgrid.py`:
 
 Setup mode (blue blink) is its own program that runs instead of all of this.
 
-If the light is off, the band is switched off, or the battery is empty and USB is not plugged in. The light uses no power when dark.
+If the light is completely dark, the band is switched off. Press the power button once and the faint glow appears at once.
 
 This is the status light (LED_RGB on the schematic). The separate CHRG light (D2) next to the charger is not part of this table.
 
@@ -247,9 +250,11 @@ Record mode writes one file per session to `sessions/` on the SD card, a CSV wit
 
 A band with no Wi-Fi saved starts **setup mode**. It becomes its own Wi-Fi network named `OM-flexgrid-<6 characters>` (WPA2, channel 1, up to 4 devices) and serves a small page at `http://192.168.4.1`.
 
+**Do the Wi-Fi setup with the USB cable plugged in.** On battery alone the band cannot start its setup network: the light stays at the faint glow and never blinks blue. Once the band has its Wi-Fi, it joins and runs on battery with no cable. The same goes for starting over: hold MENU and SELECT for 3 s with USB plugged in, so the band can come back up in setup mode.
+
 **A band without a screen (the kit).** The band cannot show its name and password, so they come from the **sticker**: `Setup Wi-Fi` is the network name and `Setup password` is the 10 characters. The light blinks blue, two quick blinks then a pause; that is the normal setup pattern. Wherever the steps below say "from the screen", read "from the sticker". The sticker is the only place the password is written down. If it is lost, hold MENU and SELECT for 3 s to take the band back to setup (the setup name and password are kept), then run `tools/kit_check.py <port>`: it prints them even when the band is not in factory state or is still charging (marked read only, not sticker text). Or reflash the band for a new password and sticker.
 
-1. Join that network from a phone or laptop with the password from the screen (or the sticker).
+1. With USB plugged in, join that network from a phone or laptop with the password from the screen (or the sticker).
 2. Open `http://192.168.4.1` in a browser. Use `http://`, not `https://`. Some phones open the page by themselves; if yours does not, type the address.
 3. Type your Wi-Fi name and password and press Connect. The page says it saved and that the band is restarting.
 4. Join your normal Wi-Fi again on the phone or laptop.
@@ -283,6 +288,7 @@ A reflash or `wipe.py` (for people preparing kits) gives the band a **new id and
 | The computer is on the same network | The app finds the band by listening for its announcements (UDP 3140). If the computer is on a different network, a guest network, or a router with "client isolation" or "AP isolation" on, the two cannot see each other. |
 | The computer's firewall lets it in | On Windows the first run may ask permission: allow private networks. The app has a `openmuscle firewall` command and a `doctor` command to check. |
 | While on the setup Wi-Fi, the laptop keeps leaving it | A computer with "no internet" on the setup network may jump back to a known network. Turn off auto-join for the setup network, join it, finish setup, then turn it back on. A phone may ask "stay connected?": say yes. |
+| No setup network, and the light only glows faintly | The band is on battery alone, which cannot start the setup network. Plug in USB; if the blue blink does not start, press BOOT. |
 | Nothing at `192.168.4.1` | Make sure you are joined to the band's network, not your home one. Use `http://`. Turn off a VPN. Try the address from a phone. |
 | Still stuck | Hold MENU and SELECT for 3 s (joined band) to return to `WIFI SETUP`, or switch the band off and on. |
 
