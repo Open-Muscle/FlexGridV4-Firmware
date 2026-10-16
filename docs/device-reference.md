@@ -21,7 +21,7 @@ Every line below was checked against the firmware source and the V4 KiCad schema
 1. **Plug the band into USB first** (a computer port or a charger) and leave it plugged in until setup is finished: on battery alone the band cannot start its setup network. The light blinks blue, two quick blinks then a pause. That is normal: it means the band is waiting to be set up.
 2. On a phone or laptop, join the Wi-Fi named on the sticker (`OM-flexgrid-` plus six characters). Password: the **Setup password** on the sticker (10 characters).
 3. Open `http://192.168.4.1` in a browser (type `http://`). Enter your Wi-Fi name and password. Press Connect.
-4. Join your normal Wi-Fi again. The light goes steady blue, then green for 2 s, then pulses while it waits for the computer. From here the band runs on battery; USB is only needed again to charge.
+4. Join your normal Wi-Fi again. The light goes steady blue, then green for 2 s, then pulses while it waits for the computer. From here the band runs on battery; USB is only needed again to charge, or to set up Wi-Fi again.
 
 (A band that does have a screen shows the same name and password on `WIFI SETUP`, and its light blinks blue once a second.)
 
@@ -33,7 +33,7 @@ Every line below was checked against the firmware source and the V4 KiCad schema
 | Tap SELECT | Pause or resume (Wi-Fi stays on) |
 | Hold MENU 2 s | Charge mode on or off (Wi-Fi off while charging) |
 | Hold SELECT 2 s | Record to SD card on or off (needs an SD card) |
-| Hold MENU and SELECT 3 s | Forget Wi-Fi, go back to setup (keep holding until it restarts) |
+| Hold MENU and SELECT 3 s | Forget Wi-Fi, go back to setup (plug in USB first; keep holding until it restarts) |
 | Power button (top edge) | Short press: on. Short press again: off |
 | BOOT | Restart the band |
 
@@ -59,7 +59,7 @@ Every line below was checked against the firmware source and the V4 KiCad schema
 | Red, fast blink | Recovered from a crash (first minute) |
 | Magenta, blinking | Both buttons held: Wi-Fi will be erased at 3 s. Let go early to cancel |
 
-**If it will not connect:** 2.4 GHz only (the band cannot see 5 GHz); password-only networks (no sign-in page, no username-and-password networks); the computer must be on the same network and the router must let devices see each other (no guest or isolation mode); retype the password carefully; to start over hold MENU and SELECT for 3 s. A laptop may jump back to a known network while you are on the setup Wi-Fi: turn off auto-join for it.
+**If it will not connect:** 2.4 GHz only (the band cannot see 5 GHz); password-only networks (no sign-in page, no username-and-password networks); the computer must be on the same network and the router must let devices see each other (no guest or isolation mode); retype the password carefully; to start over, plug in USB and hold MENU and SELECT for 3 s. A laptop may jump back to a known network while you are on the setup Wi-Fi: turn off auto-join for it.
 
 ---
 
@@ -173,7 +173,7 @@ Highest first, as resolved by `_resolve_led_state` in `flexgrid.py`:
 
 Setup mode (blue blink) is its own program that runs instead of all of this.
 
-If the light is completely dark, the band is switched off. Press the power button once and the faint glow appears at once. (A band with an empty battery and no USB is also dark; charge it.)
+If the light is completely dark, the band is switched off. Press the power button once and the faint glow appears at once.
 
 This is the status light (LED_RGB on the schematic). The separate CHRG light (D2) next to the charger is not part of this table.
 

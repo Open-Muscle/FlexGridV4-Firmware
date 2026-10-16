@@ -598,6 +598,15 @@ class TestSetupNeedsUsb(unittest.TestCase):
         self.assertIn("Dark means switched off", card)
         self.assertIn("setup does not start on battery alone", card.lower())
 
+    def test_quick_card_start_over_paths_mention_usb(self):
+        ref = doc("device-reference")
+        card = ref.split("## Quick card (print this section)")[1].split("\n---\n")[0]
+        row =[l for l in card.splitlines() if l.startswith("| Hold MENU and SELECT")]
+        self.assertEqual(len(row), 1)
+        self.assertIn("USB", row[0])
+        self.assertIn("plug in USB and hold MENU and SELECT", card)
+        self.assertIn("or to set up Wi-Fi again", card)
+
 
 if __name__ == "__main__":
     unittest.main()
