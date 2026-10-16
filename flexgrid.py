@@ -1286,6 +1286,18 @@ async def main():
     logger.init_persistent()
     logger.info("FlexGrid V4 startup")
 
+    # Light the status LED the moment the firmware runs, before the radio
+    # starts: a band with no screen has no other sign of life, and a supply
+    # that cannot feed the Wi-Fi radio (seen on battery in setup mode) would
+    # otherwise reset the chip before the first blink. Dim blue, solid, until
+    # a state loop takes over.
+    status_led = None
+    try:
+        status_led = StatusLed()
+        status_led.set_rgb(0, 0, 60)
+    except Exception as e:
+        logger.warn("Status LED init failed: {}".format(e))
+
     # Reset cause tells us how the LAST run ended.
     rc = None
     try:
@@ -1338,7 +1350,15 @@ async def main():
         # a kit band: the password is then read from the sticker and the LED
         # is the only sign of life).
         display    = DisplayManager(height=display_height_from(settings))
-        status_led = StatusLed()
+        if status_led is None:
+            status_led = StatusLed()
+        # Setup mode runs only the access point and a small web page, and on
+        # battery the supply has little headroom for the radio: slow the CPU
+        # here and let start_ap turn the transmit power down.
+        try:
+            machine.freq(80_000_000)
+        except Exception as e:
+            logger.warn("freq(80MHz) in setup mode failed: {}".format(e))
         if not display.present:
             logger.info("Setup mode with no screen (normal on a kit band): the sticker has the setup name and password; LED shows the no-screen pattern")
         led_name = "setup" if display.present else "setup_no_oled"
@@ -1379,7 +1399,8 @@ async def main():
     sensor_matrix = SensorMatrix()
     network       = NetworkManager(settings, subscribers)
     menu          = MenuManager(display, network, power)
-    status_led    = StatusLed()
+    if status_led is None:
+        status_led = StatusLed()
 
     # IMU and SD are V4-only. Both are best-effort: if the hardware is not
     # present, the firmware degrades gracefully.

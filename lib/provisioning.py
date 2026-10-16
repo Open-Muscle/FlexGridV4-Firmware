@@ -54,6 +54,8 @@ AP_GATEWAY       = "192.168.4.1"
 AP_DNS           = "192.168.4.1"
 AP_CHANNEL       = 1
 AP_MAX_CLIENTS   = 4
+AP_TXPOWER_DBM   = 10    # a phone next to the band needs no more, and the
+                         # battery path cannot feed the radio at full power
 AP_AUTH_WPA2_PSK = 3   # network.AUTH_WPA2_PSK == 3 on ESP32 MicroPython
 
 HTTP_PORT       = 80
@@ -431,6 +433,10 @@ def start_ap(settings, device_type, device_id):
 
     ap = network.WLAN(network.AP_IF)
     ap.active(True)
+    try:
+        ap.config(txpower=AP_TXPOWER_DBM)
+    except Exception as e:
+        logger.warn("AP txpower not set: {}".format(e))
     # ifconfig before config so the address space is set when clients DHCP.
     try:
         ap.ifconfig((AP_IP, AP_NETMASK, AP_GATEWAY, AP_DNS))
