@@ -46,6 +46,7 @@ from status_led       import StatusLed
 from subscribers      import Subscribers
 from discovery        import Discovery
 from commands         import CommandServer, build_handlers
+import usb_console
 from imu              import IMU
 from sd_logger        import SDLogger
 import provisioning
@@ -1233,6 +1234,30 @@ async def _handle_join_result(joined, network, settings, display, status_led, st
 
 
 # ---------------------------------------------------------------------------
+# USB console: the PC app gives the band its Wi-Fi over the USB cable
+# (lib/usb_console.py, docs/usb-console.md). Started in BOTH branches of
+# main() so a band answers on the cable whether or not it has Wi-Fi yet.
+# ---------------------------------------------------------------------------
+
+def start_usb_console(settings, set_role, get_ip=None):
+    """Spawn the USB console task. Best-effort: a failure here is logged and
+    the band carries on without the cable channel (the setup network and the
+    192.168.4.1 page still work). Keyboard-interrupt handling is untouched."""
+    try:
+        console = usb_console.UsbConsole(
+            settings,
+            save=lambda: SettingsManager.save(settings),
+            restart=machine.reset,
+            set_role=set_role,
+            get_ip=get_ip)
+        asyncio.create_task(usb_console.serve(console))
+        return console
+    except Exception as e:
+        logger.warn("USB console not started: {} ({})".format(type(e).__name__, e))
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Setup mode (no Wi-Fi credentials): LED + OLED while the HTTP server waits
 # ---------------------------------------------------------------------------
 
@@ -1364,6 +1389,17 @@ async def main():
         led_name = "setup" if display.present else "setup_no_oled"
         asyncio.create_task(setup_led_loop(status_led, led_name))
 
+        # Wi-Fi over the USB cable (the app's route; the setup network below
+        # stays as the fallback). No device state exists in setup mode, so the
+        # role verb writes straight to the settings.
+        async def _setup_set_role(role):
+            if role not in usb_console.ROLES:
+                role = ""
+            settings["role"] = role
+            SettingsManager.save(settings)
+            return role
+        start_usb_console(settings, _setup_set_role)
+
         # Bring the AP up FIRST so we know the PSK (provisioning.run mints it
         # if missing), then paint the OLED with the final SSID + PSK.
         psk = provisioning.start_ap(
@@ -1378,6 +1414,7 @@ async def main():
             "caps":   ["sensor", "status", "cmd", "imu"],
             "matrix": [15, 4],
             "oled":   display.present,
+            "usb_console": 1,
         }
         # serve() blocks until /provision lands, then soft_resets. Since
         # start_ap was already called, we drive serve() directly rather than
@@ -1502,6 +1539,12 @@ async def main():
 
     logger.info("Spawning async tasks")
     asyncio.create_task(cmd_server.serve_forever())
+    # Wi-Fi over the USB cable. The role verb reuses the TCP set_role handler
+    # so both channels share one behaviour (clamp, apply, persist).
+    _tcp_set_role = build_handlers(state)["set_role"]
+    async def _usb_set_role(role):
+        return (await _tcp_set_role({"role": role}, ("usb", 0)))["role"]
+    start_usb_console(settings, _usb_set_role, get_ip=lambda: state.ip)
     asyncio.create_task(sensor_loop(state, sensor_matrix, network, sd))
     asyncio.create_task(display_loop(display, sensor_matrix, state=state))
     # NOTE: menu_loop(menu) is intentionally NOT spawned. MenuManager's
@@ -1552,7 +1595,7 @@ async def main():
         sta_state = provisioning._ProvisioningState(
             settings, SettingsManager,
             info_extras={"caps": state.caps, "matrix": list(state.matrix_dims),
-                         "ip": sta_ip, "oled": display.present},
+                         "ip": sta_ip, "oled": display.present, "usb_console": 1},
             state="provisioned")
         asyncio.create_task(provisioning.serve(sta_state, bind_ip=sta_ip))
     else:

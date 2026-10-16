@@ -365,6 +365,7 @@ def firmware_files(factory):
         ("lib/imu.py",                    "lib/imu.py"),
         ("lib/sd_logger.py",              "lib/sd_logger.py"),
         ("lib/provisioning.py",           "lib/provisioning.py"),
+        ("lib/usb_console.py",            "lib/usb_console.py"),
     ]
     if not factory:
         files.append(("config/settings.json", "config/settings.json"))
