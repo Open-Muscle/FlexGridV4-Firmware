@@ -165,6 +165,7 @@ The sticker is **mandatory** on a kit band. With no screen, it is the only place
 
 | Symptom | What to do |
 |---|---|
+| `kit_check` (or `mpremote`) says `could not enter raw repl` on a band that answered earlier | The band has been on USB with no app listening for five minutes and dropped into charge mode, where its USB prompt stops answering. Press BOOT (or unplug and replug USB), wait for the setup light, and run the check again within five minutes. |
 | No COM port when plugged in | Try another cable (many are charge-only) and another port. On a band that is running firmware, `flash.py` puts it into download mode by itself. A blank band appears as `303a:1001`. |
 | `flash.py` says no firmware found | Put the `.bin` in `firmware/` or set `MICROPYTHON_BIN` to its path. |
 | `mpremote` says it could not enter the raw REPL | Wait 10 s and try again. The flash script pushes files over its own connection precisely to avoid this. |
