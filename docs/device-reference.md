@@ -41,6 +41,7 @@ Every line below was checked against the firmware source and the V4 KiCad schema
 
 | Light | Meaning |
 |---|---|
+| Faint white glow, always | Powered on. Dark means switched off (the power button latches: this glow tells on from off) |
 | Blue, two quick blinks then a pause | Setup, band without a screen (the kit): join the Wi-Fi on the sticker |
 | Blue, blinking once a second | Setup, band with a screen: read the screen, join the band's own Wi-Fi |
 | Blue, steady | Joining your Wi-Fi (up to 20 s) |
@@ -120,6 +121,8 @@ Buttons do nothing while the band is in setup mode (it is busy waiting for your 
 One table covers every state. The right-hand column is the name of the state in the firmware (`lib/status_led.py`, palette `PALETTE_DEFAULT`).
 
 How to read it: the colour says what kind of thing is happening, the pattern says which. Orange and amber are the same colour; steady means streaming and anything that blinks or pulses means trouble. When two things are true at once the one nearest the top of the second table wins.
+
+A powered band is never fully dark. A faint white glow sits under every pattern (the dark half of a blink, the gaps of the 3 s pulse), from the first moment the firmware runs. So dark means one thing only: the band is switched off. The power button latches, so this glow is also how you tell a press that switched the band on from one that switched it off.
 
 ### All states
 

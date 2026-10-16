@@ -236,10 +236,30 @@ class TestLedAnimation(unittest.TestCase):
         self.pins = pins
         return led
 
+    FLOOR = max(status_led.POWER_FLOOR) << 8
+
     def level(self, led, t):
+        """Brightness above the power floor (so the floor reads as 0)."""
         self.pins.clear()
         led.animate(t)
-        return max(v for _i, v in self.pins) if self.pins else 0
+        return (max(v for _i, v in self.pins) - self.FLOOR) if self.pins else 0
+
+    def test_powered_band_never_goes_fully_dark(self):
+        led = self.led()
+        floor = min(status_led.POWER_FLOOR) << 8
+        for state in status_led.PALETTE_DEFAULT:
+            led.set_state(state)
+            for t in range(0, 3200, 50):
+                self.pins.clear()
+                led.animate(t)
+                for _i, v in self.pins:
+                    self.assertGreaterEqual(v, floor, "%s went dark at %d ms" % (state, t))
+
+    def test_off_is_truly_dark(self):
+        led = self.led()
+        self.pins.clear()
+        led.off()
+        self.assertEqual([v for _i, v in self.pins], [0, 0, 0])
 
     def test_setup_blinks_once_a_second(self):
         led = self.led()

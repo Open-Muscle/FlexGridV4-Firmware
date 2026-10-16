@@ -78,6 +78,13 @@ PALETTE_DEFAULT = {
 # the ESP32-S3's LEDC capabilities, no audible whine from the components.
 _PWM_FREQ_HZ = 1000
 
+# A powered band is never fully dark. This floor sits under every pattern and
+# every state (the dark half of a blink, the gaps of the 3 s pulse, the "off"
+# palette entry), so on a band with no screen dark can only mean switched
+# off. Faint white: no state uses white at this level. off() bypasses it; it
+# is for the instant before the firmware cuts its own power.
+POWER_FLOOR = (6, 6, 6)
+
 
 class StatusLed:
     def __init__(self, palette=None):
@@ -92,7 +99,12 @@ class StatusLed:
         self._set_rgb(self._target[0], self._target[1], self._target[2])
 
     def _set_rgb(self, r, g, b):
-        """Write raw 0-255 RGB to the PWM channels."""
+        """Write 0-255 RGB to the PWM channels, never below POWER_FLOOR."""
+        self._write(max(int(r), POWER_FLOOR[0]),
+                    max(int(g), POWER_FLOOR[1]),
+                    max(int(b), POWER_FLOOR[2]))
+
+    def _write(self, r, g, b):
         # 8-bit -> 16-bit duty, common cathode so duty 0 = off.
         self._r.duty_u16(int(r) << 8)
         self._g.duty_u16(int(g) << 8)
@@ -111,8 +123,9 @@ class StatusLed:
             self._set_rgb(self._target[0], self._target[1], self._target[2])
 
     def off(self):
-        """Force off regardless of state. Used at deep sleep / shutdown."""
-        self._set_rgb(0, 0, 0)
+        """Truly dark, below the power floor: only for the instant before the
+        band cuts its own power (shutdown or deep sleep)."""
+        self._write(0, 0, 0)
 
     def set_rgb(self, r, g, b):
         """Public direct RGB write (0..255 per channel). For callers that
