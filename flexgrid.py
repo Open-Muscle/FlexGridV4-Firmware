@@ -46,7 +46,8 @@ from status_led       import StatusLed
 from subscribers      import Subscribers
 from discovery        import Discovery
 from commands         import CommandServer, build_handlers
-import usb_console
+# usb_console is imported lazily (see start_usb_console): compiling it before the
+# radio starts left too little internal RAM for the Wi-Fi driver on a kit band.
 from imu              import IMU
 from sd_logger        import SDLogger
 import provisioning
@@ -1240,6 +1241,7 @@ async def _handle_join_result(joined, network, settings, display, status_led, st
 # ---------------------------------------------------------------------------
 
 def start_usb_console(settings, set_role, get_ip=None):
+    import usb_console
     """Spawn the USB console task. Best-effort: a failure here is logged and
     the band carries on without the cable channel (the setup network and the
     192.168.4.1 page still work). Keyboard-interrupt handling is untouched."""
@@ -1393,18 +1395,20 @@ async def main():
         # stays as the fallback). No device state exists in setup mode, so the
         # role verb writes straight to the settings.
         async def _setup_set_role(role):
+            import usb_console
             if role not in usb_console.ROLES:
                 role = ""
             settings["role"] = role
             SettingsManager.save(settings)
             return role
-        start_usb_console(settings, _setup_set_role)
 
         # Bring the AP up FIRST so we know the PSK (provisioning.run mints it
         # if missing), then paint the OLED with the final SSID + PSK.
+        gc.collect()                     # the radio needs a large block of RAM
         psk = provisioning.start_ap(
             settings, settings["device_type"], settings["device_id"])
         SettingsManager.save(settings)
+        start_usb_console(settings, _setup_set_role)   # after the radio, which needs the RAM first
         ap_ssid = provisioning.ssid_for(settings["device_type"], settings["device_id"])
         last_error = settings.get("last_wifi_error") or ""
         last_ssid = settings.get("last_ssid") or ""
@@ -1435,6 +1439,7 @@ async def main():
     display       = DisplayManager(height=display_height_from(settings))
     sensor_matrix = SensorMatrix()
     network       = NetworkManager(settings, subscribers)
+    gc.collect()                         # the radio needs a large block of RAM
     menu          = MenuManager(display, network, power)
     if status_led is None:
         status_led = StatusLed()

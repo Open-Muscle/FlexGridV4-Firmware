@@ -669,7 +669,11 @@ class WiringTests(unittest.TestCase):
         setup = main_src.index("setup_led_loop(status_led, led_name)")
         first = main_src.index("start_usb_console(")
         self.assertLess(setup, first)
-        self.assertLess(first, main_src.index("provisioning.start_ap("))
+        # The setup branch starts the console only after the access point is
+        # up: compiling the module first left too little internal RAM for the
+        # Wi-Fi driver on a kit band (OSError: WiFi Out of Memory).
+        self.assertGreater(first, main_src.index("provisioning.start_ap("))
+        self.assertLess(first, main_src.index("provisioning.serve("))
         # Provisioned branch: with the other tasks.
         second = main_src.rindex("start_usb_console(")
         self.assertGreater(second, main_src.index("cmd_server.serve_forever()"))
