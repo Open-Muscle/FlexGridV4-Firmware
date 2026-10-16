@@ -26,6 +26,8 @@ Details, charge times and the parts still to be confirmed on hardware are in [do
 
 ### 2. Give it your Wi-Fi (first time only)
 
+**Do this with the USB cable plugged in.** On battery alone the band cannot start its setup network: its light stays at a faint glow and never blinks blue. Once the band has your Wi-Fi it runs on battery, and USB is only needed to charge. (A faint glow, white or faintly yellow, is normal whenever the band is on; completely dark means it is switched off.)
+
 You need a Wi-Fi network that is **2.4 GHz**, has a **password**, has **no sign-in page**, and lets devices on it see each other. A home router, an office network without a login page, or a phone hotspot set to 2.4 GHz all work. Hotel, school and cafe networks with a sign-in page, and username-and-password (enterprise) networks, do not.
 
 **Kit bands have no screen**, so a new band shows only its light: **blue, two quick blinks then a pause**. That is the normal setup pattern, not a fault. The setup Wi-Fi name and password are on the **sticker** on the band (`Setup Wi-Fi` and `Setup password`).
@@ -71,7 +73,7 @@ Two more switches are on the board that you do not normally touch: BOOT restarts
 
 ### 5. Moving to a different Wi-Fi
 
-Hold MENU and SELECT together for 3 seconds (the light blinks magenta, then the band restarts). The band returns to `WIFI SETUP` (blue, two quick blinks then a pause, on a band without a screen) with the same name and password printed on its sticker. Repeat step 2.
+With USB plugged in (setup needs it), hold MENU and SELECT together for 3 seconds (the light blinks magenta, then the band restarts). The band returns to `WIFI SETUP` (blue, two quick blinks then a pause, on a band without a screen) with the same name and password printed on its sticker. Repeat step 2.
 
 ---
 

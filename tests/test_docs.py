@@ -570,5 +570,34 @@ class TestQuickCard(unittest.TestCase):
             self.assertIn(text, card, text)
 
 
+class TestSetupNeedsUsb(unittest.TestCase):
+    """On battery alone the band cannot start its setup network, so every place
+    that describes setup says to plug in USB first."""
+
+    def test_every_setup_document_says_usb_first(self):
+        ref = doc("device-reference")
+        card = ref.split("## Quick card (print this section)")[1].split("\n---\n")[0]
+        self.assertIn("Plug the band into USB first", card)
+        self.assertIn("battery alone", card)
+        setup = section(ref, "Setup mode and getting back to it")
+        self.assertIn("USB cable plugged in", setup)
+        self.assertIn("battery alone", setup)
+        kp = doc("kit-prep")
+        step_d = kp.split("### D. Hardware")[1].split("### E. ")[0]
+        self.assertIn("Keep USB plugged in whenever the band is in setup mode", step_d)
+        self.assertIn("battery alone", step_d)
+        self.assertIn("USB cable plugged in", doc("README.md"))
+        self.assertIn("battery alone", doc("README.md"))
+        self.assertIn("needs the USB cable plugged in", doc("BRINGUP.md"))
+
+    def test_dark_means_switched_off_and_the_old_row_is_gone(self):
+        ref = doc("device-reference")
+        self.assertNotIn("battery is empty and USB is not plugged in. The light uses", ref)
+        self.assertIn("completely dark, the band is switched off", ref)
+        card = ref.split("## Quick card (print this section)")[1].split("\n---\n")[0]
+        self.assertIn("Dark means switched off", card)
+        self.assertIn("setup does not start on battery alone", card.lower())
+
+
 if __name__ == "__main__":
     unittest.main()
