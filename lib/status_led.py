@@ -88,9 +88,19 @@ POWER_FLOOR = (6, 6, 6)
 
 class StatusLed:
     def __init__(self, palette=None):
-        self._r = PWM(Pin(pinmap.RGB_R), freq=_PWM_FREQ_HZ, duty_u16=0)
-        self._g = PWM(Pin(pinmap.RGB_G), freq=_PWM_FREQ_HZ, duty_u16=0)
-        self._b = PWM(Pin(pinmap.RGB_B), freq=_PWM_FREQ_HZ, duty_u16=0)
+        # boot.py lights the power floor first and leaves its PWM channels on
+        # pinmap.BOOT_PWM; take those over. Opening a second set of channels
+        # on the same pins leaves this object's writes unable to reach the
+        # LED (the pins stay on the first owner's duty).
+        boot = getattr(pinmap, "BOOT_PWM", None)
+        if boot and len(boot) == 3:
+            self._r, self._g, self._b = boot
+            for ch in boot:
+                ch.freq(_PWM_FREQ_HZ)
+        else:
+            self._r = PWM(Pin(pinmap.RGB_R), freq=_PWM_FREQ_HZ, duty_u16=0)
+            self._g = PWM(Pin(pinmap.RGB_G), freq=_PWM_FREQ_HZ, duty_u16=0)
+            self._b = PWM(Pin(pinmap.RGB_B), freq=_PWM_FREQ_HZ, duty_u16=0)
         self.palette = palette or PALETTE_DEFAULT
         self.state = "boot"
         self._target = self.palette[self.state]
